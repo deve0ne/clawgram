@@ -853,7 +853,11 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
               });
 
               await sendTextToConversation({
-                text: prefixReplyTextToAddress(visibleText, rememberedAddress ?? groupReplyAddress),
+                text: prefixReplyTextToAddress(
+                  visibleText,
+                  rememberedAddress ?? groupReplyAddress,
+                  replyToMessageId,
+                ),
                 replyToMessageId,
                 messageThreadId,
               });
@@ -970,7 +974,11 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
             });
 
             await sendTextToConversation({
-              text: prefixReplyTextToAddress(visibleFallbackText, groupReplyAddress),
+              text: prefixReplyTextToAddress(
+                visibleFallbackText,
+                groupReplyAddress,
+                normalized.messageId,
+              ),
               replyToMessageId: Number(normalized.messageId),
               messageThreadId,
             });

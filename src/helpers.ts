@@ -735,9 +735,16 @@ function isSilentReplyText(text: string | undefined, token: string = SILENT_REPL
   return stripSilentReplyToken(trimmed, token).length === 0;
 }
 
-function prefixReplyTextToAddress(text: string, address?: string): string {
+function prefixReplyTextToAddress(
+  text: string,
+  address?: string,
+  replyToMessageId?: string | number | null,
+): string {
   const outboundText = text.trim();
-  if (!address) {
+  // Telegram already shows the addressee on a native reply. Repeating their
+  // @username in the text adds a notification and reads like shouting their
+  // name twice. Keep the prefix only for an unthreaded group message.
+  if (!address || (replyToMessageId !== null && replyToMessageId !== undefined && replyToMessageId !== "")) {
     return outboundText;
   }
 

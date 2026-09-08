@@ -64,7 +64,7 @@ describe("outbound sendMedia guards", () => {
     assert.equal(sent[0].target, "-1001");
   });
 
-  test("the caption greets whoever the reply is addressed to", async () => {
+  test("a caption relies on the native reply instead of repeating an @mention", async () => {
     const { plugin, sent } = pluginWithRuntime();
     rememberGroupReplyAddress({
       accountId: ACCOUNT, chatId: "-1001", replyToId: "55", address: "@colleague",
@@ -75,8 +75,8 @@ describe("outbound sendMedia guards", () => {
     });
 
     assert.equal(sent.length, 1);
-    assert.ok(String(sent[0].caption).startsWith("@colleague"),
-      `caption should greet the addressee, got ${JSON.stringify(sent[0].caption)}`);
+    assert.equal(sent[0].caption, "готово");
+    assert.equal(sent[0].replyToMessageId, 55);
   });
 
   test("a file with no caption is still delivered", async () => {

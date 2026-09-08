@@ -9,7 +9,12 @@ import {
   rememberGroupReplyAddress,
   resetGroupReplyAddresses,
 } from "../src/group-reply-address";
-import { rememberVisibleGroupReply, resetVisibleGroupReplies } from "../src/group-visible-reply-guard";
+import {
+  beginGroupTurnDelivery,
+  finishGroupTurnDelivery,
+  rememberVisibleGroupReply,
+  resetVisibleGroupReplies,
+} from "../src/group-visible-reply-guard";
 import { createChannelPlugin } from "../src/channel";
 import type { RuntimeMap } from "../src/types";
 
@@ -96,7 +101,7 @@ describe("message.action send addresses the message the turn is answering", () =
     return { sent, channel };
   }
 
-  it("greets the author of the message being answered, not the latest speaker", async () => {
+  it("replies to the author without repeating their mention", async () => {
     rememberGroupReplyAddress({ accountId: "default", chatId: "-100123", replyToId: "10", address: "@owner" });
     rememberGroupReplyAddress({ accountId: "default", chatId: "-100123", replyToId: "11", address: "@colleague" });
 
@@ -110,7 +115,8 @@ describe("message.action send addresses the message the turn is answering", () =
     });
 
     assert.equal(sent.length, 1);
-    assert.match(String(sent[ 0 ].text), /^@owner,/);
+    assert.equal(String(sent[ 0 ].text), "готово");
+    assert.equal(sent[ 0 ].replyToMessageId, 10);
   });
 
   it("still prefers an explicit replyToId over the turn's own message", async () => {
@@ -126,7 +132,8 @@ describe("message.action send addresses the message the turn is answering", () =
       toolContext: { currentChannelId: "-100123", currentMessageId: "10" },
     });
 
-    assert.match(String(sent[ 0 ].text), /^@colleague,/);
+    assert.equal(String(sent[ 0 ].text), "готово");
+    assert.equal(sent[ 0 ].replyToMessageId, 11);
   });
 
   it("sends without a greeting when nothing says whom it answers", async () => {
@@ -141,6 +148,28 @@ describe("message.action send addresses the message the turn is answering", () =
     });
 
     assert.equal(String(sent[ 0 ].text), "готово");
+  });
+
+  it("does not borrow a same-numbered address from another group", async () => {
+    rememberGroupReplyAddress({ accountId: "default", chatId: "-100999", replyToId: "10", address: "@stranger" });
+    const unrelatedTurn = { accountId: "default", chatId: "-100999", currentMessageId: "10" };
+    const unrelatedOwner = beginGroupTurnDelivery(unrelatedTurn);
+
+    const { sent, channel } = makeChannel();
+    await channel.actions.handleAction({
+      action: "send",
+      params: { to: "-100999", text: "готово" },
+      cfg,
+      accountId: "default",
+      toolContext: { currentChannelId: "-100123", currentMessageId: "10" },
+    });
+
+    assert.equal(sent[0].text, "готово");
+    assert.equal(sent[0].replyToMessageId, undefined);
+    assert.equal(peekGroupReplyAddress({
+      accountId: "default", chatId: "-100999", replyToId: "10",
+    }), "@stranger");
+    assert.equal(finishGroupTurnDelivery(unrelatedTurn, unrelatedOwner), false);
   });
 });
 

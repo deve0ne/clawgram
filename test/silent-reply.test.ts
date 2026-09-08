@@ -79,4 +79,13 @@ describe("silent token never reaches the reply address prefix", () => {
 
     assert.equal(prefixReplyTextToAddress(visible, "@user"), "@user, Статус обновлён.");
   });
+
+  test("a native reply does not repeat the addressee as an @mention", () => {
+    assert.equal(prefixReplyTextToAddress("Принято", "@user", 42), "Принято");
+    assert.equal(
+      prefixReplyTextToAddress("@user, Принято", "@user", 42),
+      "@user, Принято",
+      "text the agent wrote itself must not be rewritten",
+    );
+  });
 });

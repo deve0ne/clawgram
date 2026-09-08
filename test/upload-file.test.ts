@@ -3,6 +3,11 @@ import { describe, it } from "node:test";
 import { parseResult } from "./helpers";
 
 import { createChannelPlugin } from "../src/channel";
+import {
+  beginGroupTurnDelivery,
+  finishGroupTurnDelivery,
+  resetVisibleGroupReplies,
+} from "../src/group-visible-reply-guard";
 import type { RuntimeMap } from "../src/types";
 
 /**
@@ -157,6 +162,51 @@ describe("upload-file carries a real file", () => {
     assert.equal(calls.length, 1, "a send carrying media must not degrade to text");
     assert.equal(calls[ 0 ].file, "/tmp/cat.png");
     assert.equal(calls[ 0 ].caption, "подпись");
+  });
+
+  it("threads a media send to the current group message", async () => {
+    resetVisibleGroupReplies();
+    const { channel, calls } = withRecordingRuntime();
+    const turn = { accountId: "default", chatId: "-100123", currentMessageId: "10" };
+    const owner = beginGroupTurnDelivery(turn);
+
+    await channel.actions.handleAction({
+      action: "send",
+      params: { to: "-100123", message: "вот файл", media: "/tmp/cat.png" },
+      cfg,
+      accountId: "default",
+      toolContext: { currentChannelId: "-100123", currentMessageId: "10" },
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].caption, "вот файл");
+    assert.equal(calls[0].replyToMessageId, 10);
+    assert.equal(finishGroupTurnDelivery(turn, owner), true);
+
+    const final = await channel.outbound.sendText({
+      accountId: "default",
+      to: "-100123",
+      text: "вот файл",
+      replyToId: "10",
+    });
+    assert.equal((final as any).skipped, "duplicate");
+  });
+
+  it("does not claim a same-numbered turn in another group", async () => {
+    resetVisibleGroupReplies();
+    const { channel } = withRecordingRuntime();
+    const unrelatedTurn = { accountId: "default", chatId: "-100999", currentMessageId: "10" };
+    const owner = beginGroupTurnDelivery(unrelatedTurn);
+
+    await channel.actions.handleAction({
+      action: "send",
+      params: { to: "-100999", media: "/tmp/cat.png" },
+      cfg,
+      accountId: "default",
+      toolContext: { currentChannelId: "-100123", currentMessageId: "10" },
+    });
+
+    assert.equal(finishGroupTurnDelivery(unrelatedTurn, owner), false);
   });
 
   it("leaves a send without a file on the text path", async () => {

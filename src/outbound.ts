@@ -221,15 +221,16 @@ export function createOutbound(runtimes: RuntimeMap) {
         chatId: ctx.to,
         replyToId: ctx.replyToId,
       });
+      const replyToMessageId = resolveReplyToMessageIdForTarget(ctx.to, ctx.replyToId);
       const targetKind = inferOutboundTargetKind(ctx.to);
       const target = normalizeOutboundTarget(ctx.to);
       const messageThreadId = parseOptionalThreadId(ctx.threadId);
 
       const sent = await gram.sendText({
         target,
-        text: prefixReplyTextToAddress(ctx.text, groupReplyAddress),
+        text: prefixReplyTextToAddress(ctx.text, groupReplyAddress, replyToMessageId),
         targetKind,
-        replyToMessageId: resolveReplyToMessageIdForTarget(ctx.to, ctx.replyToId),
+        replyToMessageId,
         messageThreadId,
         parseMode: gram.replyParseMode,
       });
@@ -334,6 +335,7 @@ export function createOutbound(runtimes: RuntimeMap) {
       //   медиа-доставка ими не бывает.
 
       const messageThreadId = parseOptionalThreadId(ctx.threadId);
+      const replyToMessageId = resolveReplyToMessageIdForTarget(ctx.to, ctx.replyToId);
       // Same normalization `sendText` does two functions up. Without it the
       // channel prefix reaches peer resolution and the send throws — which is
       // exactly how a synthesized group reply died on 2026-08-08, silently
@@ -348,12 +350,12 @@ export function createOutbound(runtimes: RuntimeMap) {
         file,
         // Подпись получает то же обращение, что и текстовый ответ.
         caption: mediaCaption
-          ? prefixReplyTextToAddress(mediaCaption, mediaReplyAddress)
+          ? prefixReplyTextToAddress(mediaCaption, mediaReplyAddress, replyToMessageId)
           : mediaCaption,
         // Captions follow the account reply format like every other reply:
         // they are the same agent prose, just attached to a file (2.15.0).
         parseMode: gram.replyParseMode,
-        replyToMessageId: resolveReplyToMessageIdForTarget(ctx.to, ctx.replyToId),
+        replyToMessageId,
         messageThreadId,
         asVoice: ctx.audioAsVoice === true,
       });

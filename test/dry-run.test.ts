@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
 import { createChannelPlugin } from "../src/channel";
-import { rememberGroupReplyAddress, resetGroupReplyAddresses } from "../src/group-reply-address";
+import {
+  consumeGroupReplyAddress,
+  rememberGroupReplyAddress,
+  resetGroupReplyAddresses,
+} from "../src/group-reply-address";
 import { rememberVisibleGroupReply } from "../src/group-visible-reply-guard";
 import { resolveDryRun } from "../src/helpers";
 import type { RuntimeMap } from "../src/types";
@@ -125,13 +129,21 @@ describe("a dry-run send leaves the next real send untouched", () => {
 
     const h = harness();
     await h.send({ to: "-100123", text: "готово", replyToId: "42", dryRun: true });
+    assert.equal(consumeGroupReplyAddress({
+      accountId: "default", chatId: "-100123", replyToId: "42",
+    }), "@bob");
+    // Put it back after observing it; the real send below remains the subject.
+    rememberGroupReplyAddress({
+      accountId: "default", chatId: "-100123", replyToId: "42", address: "@bob",
+    });
     await h.send({ to: "-100123", text: "готово", replyToId: "42" });
 
     assert.equal(h.sends.length, 1);
-    assert.equal(h.sends[ 0 ].text, "@bob, готово");
+    assert.equal(h.sends[ 0 ].text, "готово");
+    assert.equal(h.sends[ 0 ].replyToMessageId, 42);
   });
 
-  test("a real send still consumes it, so the greeting is not repeated", async () => {
+  test("a real send consumes the address even though native replies need no greeting", async () => {
     resetGroupReplyAddresses();
     rememberGroupReplyAddress({
       accountId: "default",
@@ -144,8 +156,11 @@ describe("a dry-run send leaves the next real send untouched", () => {
     await h.send({ to: "-100123", text: "первое", replyToId: "42" });
     await h.send({ to: "-100123", text: "второе", replyToId: "42" });
 
-    assert.equal(h.sends[ 0 ].text, "@bob, первое");
+    assert.equal(h.sends[ 0 ].text, "первое");
     assert.equal(h.sends[ 1 ].text, "второе");
+    assert.equal(consumeGroupReplyAddress({
+      accountId: "default", chatId: "-100123", replyToId: "42",
+    }), undefined);
   });
 
   test("a suppressed duplicate is still reported as a dry run", async () => {

@@ -102,6 +102,7 @@ export async function handleSendAction(ctx: ActionContext): Promise<unknown> {
   // routing it to the text path dropped the file without a word.
   if (canonical === "upload-file" || (canonical === "send" && attachedFile)) {
     const rawUploadTo = resolveActionTarget(params, toolContext);
+    const uploadTargetKind = inferOutboundTargetKind(rawUploadTo);
     const uploadTo = normalizeOutboundTarget(rawUploadTo);
     const uploadAccountId = resolveRuntimeAccountId(cfg, accountId);
     if (!uploadAccountId) {
@@ -130,13 +131,27 @@ export async function handleSendAction(ctx: ActionContext): Promise<unknown> {
     const uploadReplyToId = readStringOrNumberParam(params, "replyToId") ?? readStringOrNumberParam(params, "replyTo");
     const uploadThreadId = readStringOrNumberParam(params, "threadId");
     const asVoice = readVoiceNoteFlag(params);
+    const currentChannelId = toolContext?.currentChannelId?.trim() ?? "";
+    const currentMessageId = toolContext?.currentMessageId;
+    const currentChannelTarget = currentChannelId ? normalizeOutboundTarget(currentChannelId) : "";
+    const sendingToCurrentGroup = Boolean(
+      currentChannelTarget &&
+      currentChannelTarget === uploadTo &&
+      uploadTargetKind === "group",
+    );
+    const effectiveUploadReplyToId = uploadReplyToId
+      ?? (sendingToCurrentGroup ? currentMessageId : undefined);
+    const uploadReplyToMessageId = resolveReplyToMessageIdForTarget(
+      rawUploadTo,
+      effectiveUploadReplyToId,
+    );
 
     actionLog.info("clawgram handleAction upload-file", {
       accountId: uploadAccountId,
       dryRun: dryRun === true,
       to: uploadTo,
       hasCaption: Boolean(caption),
-      replyToId: uploadReplyToId ?? null,
+      replyToId: effectiveUploadReplyToId ?? null,
       threadId: uploadThreadId ?? null,
       asVoice,
     });
@@ -163,7 +178,7 @@ export async function handleSendAction(ctx: ActionContext): Promise<unknown> {
       // omitted one inherits the account format (2.15.0). A caption is
       // the same prose as a message and renders identically.
       parseMode: resolveOutboundParseMode(params, cfg, uploadAccountId),
-      replyToMessageId: resolveReplyToMessageIdForTarget(rawUploadTo, uploadReplyToId),
+      replyToMessageId: uploadReplyToMessageId,
       messageThreadId: parseOptionalThreadId(uploadThreadId),
       asVoice,
     });
@@ -173,6 +188,31 @@ export async function handleSendAction(ctx: ActionContext): Promise<unknown> {
       to: uploadTo,
       sentMessageId: String((uploaded as any)?.id ?? ""),
     });
+
+    if (
+      sendingToCurrentGroup &&
+      uploadReplyToId === undefined &&
+      currentMessageId !== null &&
+      currentMessageId !== undefined
+    ) {
+      rememberVisibleGroupReply({
+        accountId: uploadAccountId,
+        chatId: uploadTo,
+        currentMessageId,
+      });
+    }
+    if (
+      currentChannelTarget &&
+      currentChannelTarget === uploadTo &&
+      currentMessageId !== null &&
+      currentMessageId !== undefined
+    ) {
+      rememberTurnSend({
+        accountId: uploadAccountId,
+        chatId: uploadTo,
+        currentMessageId,
+      });
+    }
 
     return jsonResult({
       ok: true,
@@ -270,10 +310,12 @@ export async function handleSendAction(ctx: ActionContext): Promise<unknown> {
   // A dry run peeks: consuming the address here left the real send with
   // no greeting, so a rehearsal silently changed the message that went
   // out afterwards.
+  const effectiveReplyToId = replyToId ?? (sendingToCurrentGroup ? currentMessageId : undefined);
+  const replyToMessageId = resolveReplyToMessageIdForTarget(rawTo, effectiveReplyToId);
   const groupReplyAddress = (dryRun ? peekGroupReplyAddress : consumeGroupReplyAddress)({
     accountId: resolvedAccountId,
     chatId: to,
-    replyToId: replyToId ?? currentMessageId,
+    replyToId: effectiveReplyToId,
   });
   const requestedText = readMessageText(params).replaceAll("\\n", "\n");
 
@@ -301,7 +343,7 @@ export async function handleSendAction(ctx: ActionContext): Promise<unknown> {
     });
   }
 
-  const text = prefixReplyTextToAddress(requestedText, groupReplyAddress);
+  const text = prefixReplyTextToAddress(requestedText, groupReplyAddress, replyToMessageId);
   if (!text) {
     throw new Error("clawgram: message text is required");
   }
@@ -321,7 +363,7 @@ export async function handleSendAction(ctx: ActionContext): Promise<unknown> {
     target: to,
     text,
     targetKind,
-    replyToMessageId: resolveReplyToMessageIdForTarget(rawTo, replyToId),
+    replyToMessageId,
     messageThreadId,
     parseMode,
   });
@@ -343,7 +385,12 @@ export async function handleSendAction(ctx: ActionContext): Promise<unknown> {
   // chat this turn came from — with or without an explicit replyToId —
   // so that core delivering the turn's final text a few seconds later
   // can be recognised as an echo of this same answer.
-  if (currentMessageId !== null && currentMessageId !== undefined) {
+  if (
+    currentChannelTarget &&
+    currentChannelTarget === to &&
+    currentMessageId !== null &&
+    currentMessageId !== undefined
+  ) {
     rememberTurnSend({
       accountId: resolvedAccountId,
       chatId: to,

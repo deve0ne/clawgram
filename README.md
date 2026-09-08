@@ -298,6 +298,10 @@ Two things are worth knowing before reaching for `open`:
   agent. Under `open` the room would otherwise watch it "type" through
   conversations it is merely reading, with nothing following.
 
+A native Telegram reply already identifies its addressee, so Clawgram does
+not prepend the same `@mention` to the reply text. Text written by the agent
+itself is left unchanged.
+
 Emoji reactions are unaffected by the rung: the channel leaves one only where
 the agent was genuinely addressed, so background reading stays unmarked.
 
