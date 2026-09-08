@@ -39,7 +39,7 @@ const CHANNEL_CAPABILITIES: ChannelCapabilities = {
     },
   },
 };
-import { waitUntilAbort } from "openclaw/plugin-sdk/channel-runtime";
+import { waitUntilAbort } from "openclaw/plugin-sdk/channel-lifecycle";
 import { extractToolSend } from "openclaw/plugin-sdk/tool-send";
 import type { ChannelCapabilities } from "openclaw/plugin-sdk";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";

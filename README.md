@@ -48,7 +48,8 @@ Clawgram is a personal-Telegram channel plugin for [OpenClaw](https://github.com
   (among them a pairing-scoped session that could restore revoked node-token authority, fixed in
   `2026.5.26`). Since this plugin reads messages and acts on an account, running it on a vulnerable
   Gateway widens the blast radius, so 2.1.0 refuses to install below that version. Built and tested
-  against `2026.7.1-2`.
+  against `2026.7.1-2`; the packaged plugin also passes a clean import smoke test against
+  `2026.9.2` using its public channel lifecycle, inbound and reply-dispatch SDK entrypoints.
 - Telegram API credentials from [my.telegram.org](https://my.telegram.org)
 - Node.js >= 22
 

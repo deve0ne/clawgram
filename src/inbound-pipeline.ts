@@ -25,15 +25,17 @@ import { readStringOrNumberParam, readStringParam } from "openclaw/plugin-sdk/pa
 import {
   dispatchInboundDirectDmWithRuntime,
   resolveInboundDirectDmAccessWithRuntime,
-} from "openclaw/plugin-sdk/direct-dm";
-import {
   resolveInboundMentionDecision,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
 import { resolveInboundRouteEnvelopeBuilderWithRuntime } from "openclaw/plugin-sdk/inbound-envelope";
 import type { ResolvedAgentRoute } from "openclaw/plugin-sdk/routing";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
-import { buildInboundReplyDispatchBase } from "openclaw/plugin-sdk/inbound-reply-dispatch";
+import {
+  hasFinalInboundReplyDispatch,
+  hasVisibleInboundReplyDispatch,
+  resolveInboundReplyDispatchCounts,
+} from "openclaw/plugin-sdk/inbound-reply-dispatch";
 import { NewMessage, Raw } from "telegram/events";
 import { TELEGRAM_SERVICE_CHAT_ID } from "./constants";
 import { normalizeTelegramEvent } from "./normalize";
@@ -786,15 +788,6 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
           },
         });
 
-        const dispatchBase = buildInboundReplyDispatchBase({
-          cfg,
-          channel: "clawgram",
-          accountId: route.accountId ?? accountId,
-          route,
-          storePath,
-          ctxPayload,
-          core: { channel: channelRuntime },
-        });
         const { onModelSelected, ...replyPipeline } = createChannelReplyPipeline({
           cfg,
           agentId: route.agentId,
@@ -805,7 +798,7 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
         // written after this instant may be salvaged. Same clock as
         // the transcript writer — both live in this process.
         const dispatchStartedAt = Date.now();
-        const dispatchResult = await dispatchBase.dispatchReplyWithBufferedBlockDispatcher({
+        const dispatchResult = await channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher({
           ctx: ctxPayload,
           cfg,
           dispatcherOptions: {
@@ -862,15 +855,11 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
           accountId,
           chatId: normalized.chatId,
           messageId: normalized.messageId,
-          queuedFinal: dispatchResult?.queuedFinal ?? null,
-          counts: dispatchResult?.counts ?? null,
+          queuedFinal: hasFinalInboundReplyDispatch(dispatchResult),
+          counts: resolveInboundReplyDispatchCounts(dispatchResult),
         });
 
-        const dispatchCounts = dispatchResult?.counts ?? { tool: 0, block: 0, final: 0 };
-        const nothingDelivered = dispatchResult?.queuedFinal !== true &&
-          (dispatchCounts.tool ?? 0) === 0 &&
-          (dispatchCounts.block ?? 0) === 0 &&
-          (dispatchCounts.final ?? 0) === 0;
+        const nothingDelivered = !hasVisibleInboundReplyDispatch(dispatchResult);
 
         if (nothingDelivered) {
           const fallbackText = readLatestAssistantFallbackFromTranscript(route.sessionKey, storePath, dispatchStartedAt);
