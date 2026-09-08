@@ -692,6 +692,41 @@ export class GramJsClientManager {
     };
   }
 
+  /** Check current membership without enumerating a truncated channel roster. */
+  async isChatParticipant(target: string, senderId: string): Promise<boolean> {
+    const resolved = await this.resolvePeer(target);
+    const peer = resolved.peer as any;
+    if (peer?.channelId !== undefined) {
+      // Resolve a numeric user id as a peer, never as a username string.
+      const sender = await this.resolvePeer(senderId);
+      try {
+        const result = await this.client.invoke(new Api.channels.GetParticipant({
+          channel: peer,
+          participant: sender.peer as any,
+        }));
+        const participant = result.participant;
+        if (participant instanceof Api.ChannelParticipantLeft) return false;
+        if (participant instanceof Api.ChannelParticipantBanned) {
+          return !participant.left && !participant.bannedRights.viewMessages
+            && toStringId((participant.peer as any)?.userId) === senderId;
+        }
+        return toStringId((participant as any).userId) === senderId;
+      } catch (error) {
+        if ((error as any)?.errorMessage === "USER_NOT_PARTICIPANT") return false;
+        throw error;
+      }
+    }
+    if (peer?.chatId !== undefined) {
+      const result = await this.client.invoke(new Api.messages.GetFullChat({ chatId: peer.chatId }));
+      const participants = (result.fullChat as any)?.participants;
+      if (!(participants instanceof Api.ChatParticipants)) {
+        throw new Error("clawgram: Telegram did not provide the group membership roster");
+      }
+      return participants.participants.some((participant) => toStringId(participant.userId) === senderId);
+    }
+    throw new Error("clawgram: DM membership target must be a group or channel");
+  }
+
   /**
    * The group chats this account belongs to.
    *

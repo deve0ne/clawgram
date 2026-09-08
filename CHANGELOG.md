@@ -9,6 +9,13 @@ recorded in `git log` only.
 
 ## [Unreleased]
 
+### Added
+
+- Optional `dmMembershipChats` requires a DM sender to currently belong to a
+  configured chat before attachment downloads or agent dispatch. Supergroups use
+  a targeted membership lookup; basic groups use their full roster. Unavailable
+  membership checks fail closed, and an absent setting preserves existing access.
+
 ## [2.28.0] — 2026-09-08
 
 ### Fixed

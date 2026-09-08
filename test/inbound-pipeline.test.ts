@@ -82,6 +82,38 @@ function pastTheGates(over: Record<string, unknown> = {}) {
 }
 
 describe("the inbound pipeline survives what the network hands it", () => {
+  it("rejects non-member DMs before attachments, sender lookup or model work", async () => {
+    for (const outcome of ["absent", "unavailable"] as const) {
+      const calls: string[] = [];
+      const { ctx } = fakeContext({
+        cfg: { channels: { clawgram: { accounts: { default: {
+          allowFrom: ["*"], dmMembershipChats: ["-1009"],
+        } } } } },
+        gram: {
+          isChatParticipant: async (chat: string, sender: string) => {
+            calls.push("membership");
+            assert.equal(chat, "-1009");
+            assert.equal(sender, "500");
+            if (outcome === "unavailable") throw new Error("CHANNEL_PRIVATE");
+            return false;
+          },
+          getClient: () => { calls.push("attachment"); return {}; },
+        },
+        client: { getEntity: async () => { calls.push("profile"); } },
+        pluginRuntime: { mediaUnderstanding: {
+          transcribeAudioFile: async () => { calls.push("transcribe"); },
+          describeImageFile: async () => { calls.push("describe"); },
+        } },
+        log: { info: () => {}, warn: () => {}, error: () => { calls.push("pipeline-error"); } },
+      });
+      await handleInboundEvent({ message: {
+        id: 8, peerId: { userId: 500 }, senderId: 500, message: "посмотри",
+        media: { className: "MessageMediaPhoto", photo: { sizes: [] } },
+      } }, ctx as never);
+      assert.deepEqual(calls, ["membership"]);
+    }
+  });
+
   const shapes: Array<[ string, unknown ]> = [
     [ "nothing at all", undefined ],
     [ "an empty object", {} ],

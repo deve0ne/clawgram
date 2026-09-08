@@ -30,6 +30,8 @@ export type PluginConfig = {
   apiHash: string | SecretRefLike;
   sessionString: string | SecretRefLike;
   allowFrom: string[];
+  /** Optional hard DM gate: sender must belong to one of these group chats. */
+  dmMembershipChats?: string[];
   groups: Record<string, GroupConfig>;
   /**
    * Chats the account may READ with the `list` action. Absent means no

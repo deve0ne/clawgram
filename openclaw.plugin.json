@@ -456,6 +456,13 @@
                   },
                   "description": "Who receives core's operational telemetry in a DM — tool-failure warnings, model-fallback notices. These carry shell commands and secret-store paths, so they go only to the people named here. Absent falls back to allowFrom when that is a concrete list; a wildcard or an empty list means no operator is identified and the notices are dropped everywhere (they stay in the run diagnostics and the gateway log)."
                 },
+                "dmMembershipChats": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Optional hard gate for direct messages. A sender must currently belong to at least one listed Telegram group before attachments are read or the agent runs. An explicitly empty list denies every DM; lookup failures fail closed."
+                },
                 "readChats": {
                   "type": "array",
                   "items": {

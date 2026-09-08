@@ -104,6 +104,7 @@ import { CORE_ACTION_SYNONYMS, MANAGE_ACTIONS, canonicalAction } from "./actions
 import {
   readInboundAttachment,
   } from "./attachments";
+import { readAccountDmMembershipChats, senderSharesConfiguredChat } from "./dm-membership";
 
 /**
  * Wires `reactToSilentMention` to this account's runtime, config and log.
@@ -368,7 +369,7 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
     const inboundGroupConfig = normalized.chatType === "group"
       ? resolveGroupConfig(inboundScopes.groups, normalized.chatId)
       : undefined;
-    const senderMayReachAgent = normalized.chatType === "group"
+    let senderMayReachAgent = normalized.chatType === "group"
       ? Boolean(
         inboundGroupConfig
         && inboundGroupConfig.enabled !== false
@@ -383,6 +384,29 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
         senderId: inboundSenderId,
         senderUsername: normalized.senderUsername,
       });
+
+    if (normalized.chatType === "direct" && senderMayReachAgent) {
+      const membershipChats = readAccountDmMembershipChats(cfg, accountId);
+      if (membershipChats !== undefined) {
+        senderMayReachAgent = await senderSharesConfiguredChat({
+          senderId: inboundSenderId,
+          chats: membershipChats,
+          isParticipant: (chatId, senderId) => gram.isChatParticipant(chatId, senderId),
+          onLookupError: ({ chatId, error }) => log?.warn?.(
+            "clawgram could not verify direct sender membership",
+            { accountId, membershipChat: chatId, error },
+          ),
+        });
+        if (!senderMayReachAgent) {
+          log?.info?.("clawgram blocking direct sender without shared group membership", {
+            accountId,
+            senderId: inboundSenderId,
+            membershipChatCount: membershipChats.length,
+          });
+          return;
+        }
+      }
+    }
 
     // The name of a direct-message sender who may reach the agent. The gate
     // above stays where B5-04 put it — a blocked sender still costs no

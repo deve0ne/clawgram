@@ -256,6 +256,7 @@ loud where it does occur.
 | `apiHash` | string | required | Telegram API hash |
 | `sessionString` | string | `""` | Authenticated StringSession |
 | `allowFrom` | string[] | `["*"]` | Allowed sender IDs/usernames for direct messages only. Three states: absent means everyone, `[]` denies everyone (a warning is logged at account start), a list allows those senders |
+| `dmMembershipChats` | string[] | unset | Optional hard DM gate: the sender must currently belong to at least one listed Telegram group. `[]` denies every DM; lookup failures fail closed before attachments or model work |
 | `operatorIds` | string[] | — | Who receives core's operational telemetry in a DM (tool-failure warnings, fallback notices). They quote shell commands and secret-store paths, so they go **only** to these ids. Absent, empty or containing `*` means no operator is identified and the notices are dropped everywhere — they stay in the run diagnostics, the job's `lastError` and the gateway log. `allowFrom` is **not** a fallback (2.25.0; it was until then, which made every allowed sender an operator) |
 | `groups` | object | `{}` | Allowed groups map keyed by explicit group id or `*` |
 | `proxy` | object | unset | Optional SOCKS4/SOCKS5 proxy for this account — see [Proxy (SOCKS4/SOCKS5)](#proxy-socks4socks5) |
