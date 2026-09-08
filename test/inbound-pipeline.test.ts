@@ -147,6 +147,7 @@ describe("the inbound pipeline survives what the network hands it", () => {
             if (outcome === "unavailable") throw new Error("CHANNEL_PRIVATE");
             return false;
           },
+          beginProcessingReaction: async () => { calls.push("processing"); },
           getClient: () => { calls.push("attachment"); return {}; },
         },
         client: { getEntity: async () => { calls.push("profile"); } },
@@ -271,18 +272,30 @@ describe("group typing follows the address decision", () => {
   const groupCfg = {
     channels: { clawgram: { accounts: { default: {
       allowFrom: [],
+      processingReaction: true,
       groups: { "-4242": { enabled: true, groupPolicy: "open", allowFrom: [ "*" ] } },
     } } } },
   };
 
-  async function observedTyping(message: Record<string, unknown>) {
-    const observations: Array<{ target: unknown; options: Record<string, unknown> | undefined }> = [];
-    const base = pastTheGates({ cfg: groupCfg });
+  async function observedTyping(message: Record<string, unknown>, cfg: unknown = groupCfg) {
+    const observations: Array<{
+      target: unknown;
+      options: Record<string, unknown> | undefined;
+      processing?: Record<string, unknown>;
+      processingFinished?: boolean;
+    }> = [];
+    let processing: Record<string, unknown> | undefined;
+    let processingFinished = false;
+    const base = pastTheGates({ cfg });
     const gram = {
       ...base.ctx.gram,
       withTyping: async (target: unknown, fn: () => Promise<unknown>, options?: Record<string, unknown>) => {
         observations.push({ target, options });
         return await fn();
+      },
+      beginProcessingReaction: async (input: Record<string, unknown>) => {
+        processing = input;
+        return { finish: async () => { processingFinished = true; } };
       },
     };
     await handleInboundEvent({ message: {
@@ -293,18 +306,34 @@ describe("group typing follows the address decision", () => {
       message: "обсудим завтра",
       ...message,
     } }, { ...base.ctx, gram } as never);
-    return observations[0];
+    return observations[0]
+      ? { ...observations[0], processing, processingFinished }
+      : undefined;
   }
 
   it("keeps an ambient open-group turn silent", async () => {
     const observed = await observedTyping({});
     assert.equal(observed?.target, "-4242");
     assert.equal(observed?.options?.typing, false);
+    assert.equal(observed?.processing, undefined);
   });
 
   it("shows typing for an explicit mention", async () => {
     const observed = await observedTyping({ message: "@agent, посмотри" });
     assert.equal(observed?.options?.typing, true);
+    assert.deepEqual(observed?.processing, { target: "-4242", messageId: "20", enabled: true });
+    assert.equal(observed?.processingFinished, true);
+  });
+
+  it("keeps the processing marker off until the account opts in", async () => {
+    const cfg = {
+      channels: { clawgram: { accounts: { default: {
+        allowFrom: [],
+        groups: { "-4242": { enabled: true, groupPolicy: "open", allowFrom: [ "*" ] } },
+      } } } },
+    };
+    const observed = await observedTyping({ message: "@agent, посмотри" }, cfg);
+    assert.equal(observed?.processing, undefined);
   });
 
   it("shows typing for a reply to the agent", async () => {
@@ -313,6 +342,7 @@ describe("group typing follows the address decision", () => {
       getReplyMessage: async () => ({ id: 19, out: true, message: "мой прошлый ответ" }),
     });
     assert.equal(observed?.options?.typing, true);
+    assert.equal(observed?.processing?.enabled, true);
   });
 
   it("keeps the forum topic on typing and read receipts", async () => {
@@ -323,6 +353,36 @@ describe("group typing follows the address decision", () => {
     assert.equal(observed?.options?.typing, true);
     assert.equal(observed?.options?.messageThreadId, 77);
     assert.equal(observed?.options?.readMessageId, 20);
+    assert.deepEqual(observed?.processing, { target: "-4242", messageId: "20", enabled: true });
+  });
+});
+
+describe("direct-message processing reaction", () => {
+  it("starts only after membership admission and always finishes", async () => {
+    const events: string[] = [];
+    const base = pastTheGates({
+      cfg: { channels: { clawgram: { accounts: { default: {
+        allowFrom: [ "*" ], dmMembershipChats: [ "-1009" ], processingReaction: true,
+      } } } } },
+      gram: {
+        isChatParticipant: async () => { events.push("membership"); return true; },
+        getClient: () => ({}),
+        withTyping: async (_target: unknown, fn: () => Promise<unknown>) => await fn(),
+        beginProcessingReaction: async (input: Record<string, unknown>) => {
+          events.push(`begin:${input.target}:${input.messageId}`);
+          return { finish: async () => { events.push("finish"); } };
+        },
+      },
+      client: { getEntity: async () => { events.push("profile"); return { firstName: "Вася" }; } },
+      log: { info: () => {}, warn: () => {}, error: () => {} },
+    });
+    (base.ctx.channelRuntime as any).commands.shouldComputeCommandAuthorized = () => false;
+
+    await handleInboundEvent({ message: {
+      id: 8, peerId: { userId: 500 }, senderId: 500, message: "привет",
+    } }, base.ctx as never);
+
+    assert.deepEqual(events, [ "membership", "begin:500:8", "profile", "finish" ]);
   });
 });
 

@@ -256,6 +256,10 @@ export function visibleReplyText(params: {
 export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
   const { accountId, cfg, channelRuntime, client, gram, log,
     pluginRuntime, runtimes, selfId, selfLabel, selfUsername } = ctx;
+  let directProcessingLease: { finish: () => Promise<void> } | undefined;
+  let directProcessingMessage: { chatId: string; messageId: string } | undefined;
+  let groupProcessingLease: { finish: () => Promise<void> } | undefined;
+  let groupProcessingMessage: { chatId: string; messageId: string } | undefined;
 
   try {
     const rawMessage = (event as any)?.message;
@@ -384,6 +388,22 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
     // budget at will. None of these checks depend on the message text,
     // so they cost nothing to run first.
     const inboundSenderId = normalized.senderId ?? normalized.chatId;
+    const isTelegramServiceDirect = normalized.chatType === "direct" &&
+      (normalized.chatId === TELEGRAM_SERVICE_CHAT_ID || inboundSenderId === TELEGRAM_SERVICE_CHAT_ID);
+    const isSavedMessagesDirect = normalized.chatType === "direct" &&
+      Boolean(selfId) && normalized.chatId === selfId && inboundSenderId === selfId;
+    if (isTelegramServiceDirect || isSavedMessagesDirect) {
+      log?.info?.(isTelegramServiceDirect
+        ? "clawgram skipping Telegram service direct chat"
+        : "clawgram skipping Saved Messages direct chat", {
+        accountId,
+        chatId: normalized.chatId,
+        messageId: normalized.messageId,
+        senderId: inboundSenderId,
+        ...isSavedMessagesDirect ? { selfId } : {},
+      });
+      return;
+    }
     const inboundScopes = resolveAccountScopes(cfg, accountId);
     const inboundGroupConfig = normalized.chatType === "group"
       ? resolveGroupConfig(inboundScopes.groups, normalized.chatId)
@@ -427,6 +447,27 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
       }
     }
 
+    if (
+      normalized.chatType === "direct" &&
+      senderMayReachAgent &&
+      cfg?.channels?.[CHANNEL_ID]?.accounts?.[accountId]?.processingReaction === true
+    ) {
+      directProcessingLease = await gram.beginProcessingReaction?.({
+        target: normalized.chatId,
+        messageId: normalized.messageId,
+        enabled: true,
+      }).catch((error: unknown) => {
+        log?.info?.("clawgram processing reaction unavailable", {
+          accountId,
+          chatId: normalized.chatId,
+          messageId: normalized.messageId,
+          error: String(error),
+        });
+        return undefined;
+      });
+      directProcessingMessage = { chatId: normalized.chatId, messageId: normalized.messageId };
+    }
+
     // The name of a direct-message sender who may reach the agent. The gate
     // above stays where B5-04 put it — a blocked sender still costs no
     // call. A group sender is looked up later, after the mention gate, for
@@ -455,6 +496,49 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
       })
       : undefined;
     const routedAgentId = (inboundRouteBuilder?.route as ResolvedAgentRoute | undefined)?.agentId;
+
+    // Text/caption mentions and replies to the agent are decidable before a
+    // potentially slow image/voice reading. Voice-only addressing necessarily
+    // waits for its transcript and gets a second chance at the final gate.
+    let preliminaryGroupReplyParent: Awaited<ReturnType<typeof resolveReplyParent>> | undefined;
+    if (
+      normalized.chatType === "group" &&
+      senderMayReachAgent &&
+      inboundGroupConfig &&
+      inboundRouteBuilder
+    ) {
+      const route = inboundRouteBuilder.route as ResolvedAgentRoute;
+      const preliminaryText = normalized.text?.trim() ?? "";
+      const preliminaryMention = inboundGroupConfig.groupPolicy === "tag"
+        ? hasExplicitTelegramMention({ selfUsername, text: preliminaryText, message: rawMessage })
+        : hasTelegramMention({
+            cfg,
+            agentId: route.agentId,
+            selfUsername,
+            text: preliminaryText,
+            message: rawMessage,
+          });
+      preliminaryGroupReplyParent = await resolveReplyParent(rawMessage, { selfId, selfLabel });
+      if (
+        cfg?.channels?.[CHANNEL_ID]?.accounts?.[accountId]?.processingReaction === true &&
+        (preliminaryMention || preliminaryGroupReplyParent.isSelf)
+      ) {
+        groupProcessingLease = await gram.beginProcessingReaction?.({
+          target: normalized.chatId,
+          messageId: normalized.messageId,
+          enabled: true,
+        }).catch((error: unknown) => {
+          log?.info?.("clawgram processing reaction unavailable", {
+            accountId,
+            chatId: normalized.chatId,
+            messageId: normalized.messageId,
+            error: String(error),
+          });
+          return undefined;
+        });
+        groupProcessingMessage = { chatId: normalized.chatId, messageId: normalized.messageId };
+      }
+    }
 
     // An attachment carries no text of its own, and dropping it as
     // "empty" is how the assistant used to go silent on being spoken
@@ -514,34 +598,6 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
     }
 
     const senderId = normalized.senderId ?? normalized.chatId;
-    const isTelegramServiceDirect = normalized.chatType === "direct" &&
-      (normalized.chatId === TELEGRAM_SERVICE_CHAT_ID || senderId === TELEGRAM_SERVICE_CHAT_ID);
-    const isSavedMessagesDirect = normalized.chatType === "direct" &&
-      Boolean(selfId) &&
-      normalized.chatId === selfId &&
-      senderId === selfId;
-
-    if (isTelegramServiceDirect) {
-      log?.info?.("clawgram skipping Telegram service direct chat", {
-        accountId,
-        chatId: normalized.chatId,
-        messageId: normalized.messageId,
-        senderId,
-      });
-      return;
-    }
-
-    if (isSavedMessagesDirect) {
-      log?.info?.("clawgram skipping Saved Messages direct chat", {
-        accountId,
-        chatId: normalized.chatId,
-        messageId: normalized.messageId,
-        senderId,
-        selfId,
-      });
-      return;
-    }
-
     const senderUsername = normalized.senderUsername;
     const senderLabel = normalized.senderDisplay || normalized.senderUsername || senderId;
     const conversationTarget = normalized.chatType === "direct"
@@ -658,7 +714,8 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
       // One fetch serves two needs: the reply-to-self gate below and
       // the parent's text for the agent (ReplyToBody), which a plain
       // reply does not carry on its own.
-      const replyParent = await resolveReplyParent(rawMessage, { selfId, selfLabel });
+      const replyParent = preliminaryGroupReplyParent
+        ?? await resolveReplyParent(rawMessage, { selfId, selfLabel });
       const wasReplyToSelf = replyParent.isSelf;
       const mentionDecision = resolveInboundMentionDecision({
         facts: {
@@ -775,6 +832,28 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
 
       const messageThreadId = parseOptionalThreadId(normalized.messageThreadId);
       const groupTypingTarget = normalized.chatId;
+      const processingReactionEnabled = cfg?.channels?.[CHANNEL_ID]?.accounts?.[accountId]?.processingReaction === true;
+
+      if (
+        !groupProcessingLease &&
+        processingReactionEnabled &&
+        (mentionDecision.effectiveWasMentioned || wasReplyToSelf)
+      ) {
+        groupProcessingLease = await gram.beginProcessingReaction?.({
+          target: normalized.chatId,
+          messageId: normalized.messageId,
+          enabled: true,
+        }).catch((error: unknown) => {
+          log?.info?.("clawgram processing reaction unavailable", {
+            accountId,
+            chatId: normalized.chatId,
+            messageId: normalized.messageId,
+            error: String(error),
+          });
+          return undefined;
+        });
+        groupProcessingMessage = { chatId: normalized.chatId, messageId: normalized.messageId };
+      }
 
       await gram.withTyping(groupTypingTarget, async () => {
         log?.info?.("clawgram dispatching group reply", {
@@ -1148,6 +1227,23 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
       chatId: String(rawMessage?.chatId ?? rawMessage?.peerId?.userId ?? rawMessage?.peerId?.chatId ?? rawMessage?.peerId?.channelId ?? ""),
       messageId: String(rawMessage?.id ?? ""),
       error: String(error),
+    });
+  } finally {
+    await groupProcessingLease?.finish().catch((error: unknown) => {
+      log?.info?.("clawgram processing reaction cleanup deferred", {
+        accountId,
+        chatId: groupProcessingMessage?.chatId,
+        messageId: groupProcessingMessage?.messageId,
+        error: String(error),
+      });
+    });
+    await directProcessingLease?.finish().catch((error: unknown) => {
+      log?.info?.("clawgram processing reaction cleanup deferred", {
+        accountId,
+        chatId: directProcessingMessage?.chatId,
+        messageId: directProcessingMessage?.messageId,
+        error: String(error),
+      });
     });
   }
 

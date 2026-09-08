@@ -229,13 +229,22 @@ describe("openclaw.plugin.json accepts SecretRefs for credentials", () => {
  * the SecretRef schema: one half updated, the other silently left behind.
  */
 describe("plugin version is declared consistently", () => {
-  test("openclaw.plugin.json matches package.json", () => {
+  test("openclaw.plugin.json and npm-shrinkwrap.json match package.json", () => {
     const pkg = JSON.parse(readFileSync(path.resolve(__dirname, "..", "..", "package.json"), "utf8"));
+    const shrinkwrap = JSON.parse(
+      readFileSync(path.resolve(__dirname, "..", "..", "npm-shrinkwrap.json"), "utf8"),
+    );
 
     assert.equal(
       manifest.version,
       pkg.version,
       `openclaw.plugin.json says ${manifest.version}, package.json says ${pkg.version} — bump both`,
+    );
+    assert.equal(shrinkwrap.version, pkg.version, "npm-shrinkwrap.json root version must match package.json");
+    assert.equal(
+      shrinkwrap.packages?.[ "" ]?.version,
+      pkg.version,
+      "npm-shrinkwrap.json package version must match package.json",
     );
   });
 });
@@ -248,6 +257,12 @@ describe("plugin version is declared consistently", () => {
  * shipped — the code honoured it, the schema refused it.
  */
 describe("account schema accepts what the code reads", () => {
+  test("processingReaction is an opt-in boolean", () => {
+    assert.equal((validateAccount({ ...BASE_ACCOUNT }) as ValidationResult).ok, true);
+    assert.equal((validateAccount({ ...BASE_ACCOUNT, processingReaction: true }) as ValidationResult).ok, true);
+    assert.equal((validateAccount({ ...BASE_ACCOUNT, processingReaction: "yes" }) as ValidationResult).ok, false);
+  });
+
   test("replyParseMode is allowed with every value the code normalizes", () => {
     for (const mode of [ "markdown", "md", "html" ]) {
       const result = validateAccount({ ...BASE_ACCOUNT, replyParseMode: mode }) as ValidationResult;

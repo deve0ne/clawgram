@@ -32,6 +32,8 @@ export type PluginConfig = {
   allowFrom: string[];
   /** Optional hard DM gate: sender must belong to one of these group chats. */
   dmMembershipChats?: string[];
+  /** Opt-in temporary 👀 while an admitted, addressed turn is running. */
+  processingReaction?: boolean;
   groups: Record<string, GroupConfig>;
   /**
    * Chats the account may READ with the `list` action. Absent means no

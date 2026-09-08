@@ -6,7 +6,7 @@ import { CustomFile } from "telegram/client/uploads";
 // the package has no `exports` field to forbid it.
 import { computeCheck } from "telegram/Password";
 import type { PluginConfig, ResolvedTelegramTarget, SendMediaArgs, SendTextArgs, ChatType } from "./types.ts";
-import { normalizeParseMode } from "./helpers";
+import { normalizeOutboundTarget, normalizeParseMode } from "./helpers";
 import { renderTelegramHtml } from "./html-render";
 import { buildTelegramClientOptions, describeProxy, type TelegramProxyConfig } from "./proxy-config";
 import { hasUnresolvedSecretRef } from "./secret-refs";
@@ -24,6 +24,12 @@ import { createSubsystemLogger } from "openclaw/plugin-sdk/core";
 
 import { ExpiringMap } from "./expiring-map";
 import { toStringId } from "./normalize";
+import {
+  ProcessingReactionLifecycle,
+  hasOwnReactionInMessage,
+  ownEmojiReactionFromMessage,
+  type ProcessingReactionLease,
+} from "./processing-reaction";
 
 /** Ten minutes: long enough to spare the repeat lookups of one turn,
  *  short enough that a replaced session or a vanished peer is re-resolved. */
@@ -219,6 +225,7 @@ export class GramJsClientManager {
   private proxy: TelegramProxyConfig | undefined;
   private started = false;
   private connected = false;
+  private readonly processingReactions: ProcessingReactionLifecycle;
 
   constructor(private readonly config: PluginConfig) {
     // Credentials may be written as SecretRefs; account start-up resolves them
@@ -241,6 +248,17 @@ export class GramJsClientManager {
       config.apiHash as string,
       clientOptions
     );
+    this.processingReactions = new ProcessingReactionLifecycle(config.accountId ?? "default", {
+      allowedReactions: (target) => this.getAllowedReactions(target),
+      sendReaction: (args) => this.sendReactionRaw(args),
+      removeIfMatches: (args) => this.removeReactionIfMatches(args),
+      hasOwnReaction: (target, messageId) => this.hasOwnReaction(target, messageId),
+      onError: (where, error) => peerLog.warn("clawgram processing reaction failed", {
+        accountId: config.accountId ?? "default",
+        where,
+        error: String(error),
+      }),
+    });
   }
 
   /** Credential-free proxy summary (`socks4`/`socks5`) for diagnostics. */
@@ -272,6 +290,12 @@ export class GramJsClientManager {
     }
 
     this.started = true;
+    await this.processingReactions.reconcile().catch((error) => {
+      peerLog.warn("clawgram processing reaction reconciliation failed", {
+        accountId: this.config.accountId ?? "default",
+        error: String(error),
+      });
+    });
   }
 
   /**
@@ -296,6 +320,9 @@ export class GramJsClientManager {
     // still left alone, and a second `stop()` still destroys nothing.
     if (!this.started && !this.connected) return;
 
+    // Some SDK probes construct a manager-shaped object without running the
+    // constructor. Keep teardown tolerant of that same lazy test/runtime seam.
+    await this.processingReactions?.finishAll().catch(() => undefined);
     await this.client.destroy().catch(() => undefined);
     this.started = false;
     this.connected = false;
@@ -596,6 +623,21 @@ export class GramJsClientManager {
     emoji: string;
     remove: boolean;
   }): Promise<void> {
+    const lifecycleTarget = typeof args.target === "string"
+      ? parseTargetWithThread(normalizeOutboundTarget(args.target)).chatId
+      : args.target;
+    await this.processingReactions.runSupersedingReaction(
+      { target: lifecycleTarget, messageId: args.messageId },
+      () => this.sendReactionRaw(args),
+    );
+  }
+
+  private async sendReactionRaw(args: {
+    target: unknown;
+    messageId: number;
+    emoji: string;
+    remove: boolean;
+  }): Promise<void> {
     const resolved = await this.resolvePeer(args.target);
 
     await this.client.invoke(new Api.messages.SendReaction({
@@ -603,6 +645,39 @@ export class GramJsClientManager {
       msgId: args.messageId,
       reaction: args.remove ? [] : [ new Api.ReactionEmoji({ emoticon: args.emoji }) ],
     }));
+  }
+
+  async beginProcessingReaction(args: {
+    target: unknown;
+    messageId: unknown;
+    enabled: boolean;
+  }): Promise<ProcessingReactionLease | undefined> {
+    return await this.processingReactions.begin(args);
+  }
+
+  /** Clears our temporary marker only while it is still the reaction we set. */
+  async removeReactionIfMatches(args: {
+    target: string;
+    messageId: number;
+    emoji: string;
+  }): Promise<boolean> {
+    const resolved = await this.resolvePeer(args.target);
+    const fetched = await this.client.getMessages(resolved.peer as any, { ids: [ args.messageId ] } as any);
+    const message = Array.isArray(fetched)
+      ? fetched.find((entry: any) => entry && entry.className !== "MessageEmpty")
+      : undefined;
+    if (ownEmojiReactionFromMessage(message) !== args.emoji) return false;
+    await this.sendReactionRaw({ ...args, remove: true });
+    return true;
+  }
+
+  private async hasOwnReaction(target: string, messageId: number): Promise<boolean> {
+    const resolved = await this.resolvePeer(target);
+    const fetched = await this.client.getMessages(resolved.peer as any, { ids: [ messageId ] } as any);
+    const message = Array.isArray(fetched)
+      ? fetched.find((entry: any) => entry && entry.className !== "MessageEmpty")
+      : undefined;
+    return hasOwnReactionInMessage(message);
   }
 
   /**

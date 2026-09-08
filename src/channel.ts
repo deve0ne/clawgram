@@ -231,6 +231,7 @@ export const createChannelPlugin = (runtimes: RuntimeMap, pluginRuntime?: Plugin
           // client from a config object this function had already stripped it
           // from, so the setting validated, deployed and did nothing.
           replyParseMode: account?.replyParseMode,
+          processingReaction: account?.processingReaction === true,
           manageChats: readAccountManageChats(account),
           // Optional secret: absent must stay absent, not become "".
           twoFaPassword: account?.twoFaPassword === undefined || account?.twoFaPassword === null
