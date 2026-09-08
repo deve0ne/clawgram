@@ -71,6 +71,54 @@ export function rememberVisibleGroupReply(input: {
 // только если ядро прислало эхо этого хода. Хода без эха — большинство (A6-16).
 const lastTurnSends = new ExpiringMap<true>(GROUP_TURN_ECHO_WINDOW_MS);
 
+/**
+ * Tool-send delivery state for the dispatch that is currently running.
+ *
+ * Unlike `lastTurnSends`, this state is not a recency heuristic: the inbound
+ * pipeline opens it immediately before core dispatch and consumes it
+ * immediately after dispatch. The long TTL is only crash cleanup.
+ */
+const activeGroupTurns = new ExpiringMap<Map<string, boolean>>(24 * 60 * 60 * 1000);
+let nextGroupTurnOwner = 0;
+
+export function beginGroupTurnDelivery(input: {
+  accountId?: string | null;
+  chatId: unknown;
+  currentMessageId?: string | number | null;
+}, now: number = Date.now()): string | undefined {
+  const key = buildVisibleGroupReplyKey(input);
+  if (key) {
+    const owner = `${++nextGroupTurnOwner}`;
+    const owners = activeGroupTurns.get(key, now) ?? new Map<string, boolean>();
+    // A replay that starts after its twin already sent must inherit that
+    // observable fact. There may be no second tool call to mark the replay.
+    owners.set(owner, Array.from(owners.values()).some(Boolean));
+    activeGroupTurns.set(key, owners, now);
+    return owner;
+  }
+  return undefined;
+}
+
+export function finishGroupTurnDelivery(input: {
+  accountId?: string | null;
+  chatId: unknown;
+  currentMessageId?: string | number | null;
+}, owner: string | undefined, now: number = Date.now()): boolean {
+  const key = buildVisibleGroupReplyKey(input);
+  if (!key || !owner) {
+    return false;
+  }
+  const owners = activeGroupTurns.get(key, now);
+  const delivered = owners?.get(owner) === true;
+  owners?.delete(owner);
+  if (!owners || owners.size === 0) {
+    activeGroupTurns.delete(key);
+  } else {
+    activeGroupTurns.set(key, owners, now);
+  }
+  return delivered;
+}
+
 /** Records that the agent itself put a message in the chat during this turn. */
 export function rememberTurnSend(input: {
   accountId?: string | null;
@@ -83,6 +131,13 @@ export function rememberTurnSend(input: {
   }
 
   lastTurnSends.set(key, true, sentAt);
+  const owners = activeGroupTurns.get(key, sentAt);
+  if (owners) {
+    for (const owner of owners.keys()) {
+      owners.set(owner, true);
+    }
+    activeGroupTurns.set(key, owners, sentAt);
+  }
 }
 
 /**
@@ -116,4 +171,6 @@ export function hadTurnSendJustNow(input: {
 export function resetVisibleGroupReplies(): void {
   recentVisibleGroupReplies.clear();
   lastTurnSends.clear();
+  activeGroupTurns.clear();
+  nextGroupTurnOwner = 0;
 }

@@ -74,6 +74,8 @@ import {
 import type { PluginConfig, RuntimeMap } from "./types";
 import { consumeGroupReplyAddress, rememberGroupReplyAddress, buildGroupReplyAddress } from "./group-reply-address";
 import {
+  beginGroupTurnDelivery,
+  finishGroupTurnDelivery,
   hadTurnSendJustNow,
   hasRecentVisibleGroupReply,
   rememberTurnSend,
@@ -178,6 +180,21 @@ export type InboundContext = {
   selfUsername: string | undefined;
   selfLabel: string | undefined;
 };
+
+/**
+ * A group turn is visible when either core delivered its buffered reply or the
+ * agent sent the answer through the channel tool during this same turn.
+ *
+ * Core's dispatch receipt cannot include tool sends. Treating that receipt as
+ * the whole truth made the silent-mention fallback react *after* an answer had
+ * already appeared in Telegram.
+ */
+export function didGroupTurnDeliverVisibleReply(params: {
+  dispatchDelivered: boolean;
+  toolSendDelivered: boolean;
+}): boolean {
+  return params.dispatchDelivered || params.toolSendDelivered;
+}
 
 /**
  * The text a reply may carry into a chat, after the filters every reply path
@@ -798,7 +815,15 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
         // written after this instant may be salvaged. Same clock as
         // the transcript writer — both live in this process.
         const dispatchStartedAt = Date.now();
-        const dispatchResult = await channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher({
+        const groupTurnKey = {
+          accountId: route.accountId ?? accountId,
+          chatId: normalized.chatId,
+          currentMessageId: normalized.messageId,
+        };
+        const groupTurnOwner = beginGroupTurnDelivery(groupTurnKey);
+        let dispatchResult: any;
+        try {
+          dispatchResult = await channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher({
           ctx: ctxPayload,
           cfg,
           dispatcherOptions: {
@@ -857,9 +882,17 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
           messageId: normalized.messageId,
           queuedFinal: hasFinalInboundReplyDispatch(dispatchResult),
           counts: resolveInboundReplyDispatchCounts(dispatchResult),
-        });
+          });
+        } catch (error) {
+          finishGroupTurnDelivery(groupTurnKey, groupTurnOwner);
+          throw error;
+        }
+        const toolSendDelivered = finishGroupTurnDelivery(groupTurnKey, groupTurnOwner);
 
-        const nothingDelivered = !hasVisibleInboundReplyDispatch(dispatchResult);
+        const nothingDelivered = !didGroupTurnDeliverVisibleReply({
+          dispatchDelivered: hasVisibleInboundReplyDispatch(dispatchResult),
+          toolSendDelivered,
+        });
 
         if (nothingDelivered) {
           const fallbackText = readLatestAssistantFallbackFromTranscript(route.sessionKey, storePath, dispatchStartedAt);

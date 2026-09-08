@@ -3,7 +3,57 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import { agentFacingGroupBody, handleInboundEvent } from "../src/inbound-pipeline";
+import {
+  agentFacingGroupBody,
+  didGroupTurnDeliverVisibleReply,
+  handleInboundEvent,
+} from "../src/inbound-pipeline";
+import {
+  beginGroupTurnDelivery,
+  finishGroupTurnDelivery,
+  rememberTurnSend,
+  resetVisibleGroupReplies,
+} from "../src/group-visible-reply-guard";
+
+describe("group turn delivery accounting", () => {
+  it("counts a message.send tool result as visible for the same inbound turn", () => {
+    resetVisibleGroupReplies();
+    const turn = { accountId: "default", chatId: "-100123", currentMessageId: "42" };
+
+    const emptyOwner = beginGroupTurnDelivery(turn, 1);
+    assert.equal(finishGroupTurnDelivery(turn, emptyOwner, 1), false);
+    const owner = beginGroupTurnDelivery(turn, 1);
+    rememberTurnSend(turn, 1);
+    // The echo-suppression heuristic expires after 20 seconds. Dispatch
+    // ownership must survive longer because a tool can keep working after it
+    // has already sent the visible answer.
+    const toolSendDelivered = finishGroupTurnDelivery(turn, owner, 30_001);
+    assert.equal(didGroupTurnDeliverVisibleReply({ dispatchDelivered: false, toolSendDelivered }), true);
+    assert.equal(didGroupTurnDeliverVisibleReply({
+      dispatchDelivered: false,
+      toolSendDelivered: finishGroupTurnDelivery({ ...turn, currentMessageId: "43" }, owner),
+    }), false);
+  });
+
+  it("keeps overlapping deliveries of the same update independently owned", () => {
+    resetVisibleGroupReplies();
+    const turn = { accountId: "default", chatId: "-100123", currentMessageId: "42" };
+    const first = beginGroupTurnDelivery(turn, 1);
+    rememberTurnSend(turn, 2);
+    const second = beginGroupTurnDelivery(turn, 3);
+
+    assert.equal(finishGroupTurnDelivery(turn, first, 5), true);
+    assert.equal(finishGroupTurnDelivery(turn, second, 5), true);
+  });
+
+  it("keeps core dispatch receipts sufficient on their own", () => {
+    resetVisibleGroupReplies();
+    assert.equal(didGroupTurnDeliverVisibleReply({
+      dispatchDelivered: true,
+      toolSendDelivered: false,
+    }), true);
+  });
+});
 
 /**
  * The inbound path had no test at all until this file.
