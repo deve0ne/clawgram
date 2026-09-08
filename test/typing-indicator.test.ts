@@ -90,6 +90,31 @@ describe("typing indicator", () => {
     );
   });
 
+  test("an addressed turn cancels typing when dispatch throws", async () => {
+    const { manager, invoked } = managerWithFakeClient();
+
+    await assert.rejects(
+      manager.withTyping("-100", async () => {
+        await new Promise((resolve) => setImmediate(resolve));
+        throw new Error("dispatch blew up");
+      }, { readMessageId: 42 }),
+      /dispatch blew up/,
+    );
+
+    assert.deepEqual(invoked, [ "SendMessageTypingAction", "SendMessageCancelAction" ]);
+  });
+
+  test("a forum topic carries topMsgId on the typing pulse", async () => {
+    const requests: any[] = [];
+    const { manager } = managerWithFakeClient();
+    manager.client.invoke = async (request: any) => { requests.push(request); };
+
+    await manager.withTyping("-100", slowTurn, { readMessageId: 42, messageThreadId: 77 });
+
+    assert.equal(requests[0]?.topMsgId, 77);
+    assert.equal(requests.at(-1)?.action?.className, "SendMessageCancelAction");
+  });
+
   // A chat the account cannot resolve must not cost the turn: the indicator is
   // decoration, the dispatch is the work.
   test("typing: false still runs the turn when the peer cannot be resolved", async () => {

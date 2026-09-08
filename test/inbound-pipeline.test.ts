@@ -217,6 +217,65 @@ describe("the inbound pipeline survives what the network hands it", () => {
   });
 });
 
+describe("group typing follows the address decision", () => {
+  const groupCfg = {
+    channels: { clawgram: { accounts: { default: {
+      allowFrom: [],
+      groups: { "-4242": { enabled: true, groupPolicy: "open", allowFrom: [ "*" ] } },
+    } } } },
+  };
+
+  async function observedTyping(message: Record<string, unknown>) {
+    const observations: Array<{ target: unknown; options: Record<string, unknown> | undefined }> = [];
+    const base = pastTheGates({ cfg: groupCfg });
+    const gram = {
+      ...base.ctx.gram,
+      withTyping: async (target: unknown, fn: () => Promise<unknown>, options?: Record<string, unknown>) => {
+        observations.push({ target, options });
+        return await fn();
+      },
+    };
+    await handleInboundEvent({ message: {
+      id: 20,
+      peerId: { chatId: 4242 },
+      senderId: 500,
+      _sender: { firstName: "Вася" },
+      message: "обсудим завтра",
+      ...message,
+    } }, { ...base.ctx, gram } as never);
+    return observations[0];
+  }
+
+  it("keeps an ambient open-group turn silent", async () => {
+    const observed = await observedTyping({});
+    assert.equal(observed?.target, "-4242");
+    assert.equal(observed?.options?.typing, false);
+  });
+
+  it("shows typing for an explicit mention", async () => {
+    const observed = await observedTyping({ message: "@agent, посмотри" });
+    assert.equal(observed?.options?.typing, true);
+  });
+
+  it("shows typing for a reply to the agent", async () => {
+    const observed = await observedTyping({
+      replyTo: { replyToMsgId: 19 },
+      getReplyMessage: async () => ({ id: 19, out: true, message: "мой прошлый ответ" }),
+    });
+    assert.equal(observed?.options?.typing, true);
+  });
+
+  it("keeps the forum topic on typing and read receipts", async () => {
+    const observed = await observedTyping({
+      message: "@agent, посмотри",
+      replyTo: { forumTopic: true, replyToTopId: 77 },
+    });
+    assert.equal(observed?.options?.typing, true);
+    assert.equal(observed?.options?.messageThreadId, 77);
+    assert.equal(observed?.options?.readMessageId, 20);
+  });
+});
+
 describe("what the agent reads for a group message", () => {
   it("carries the address the channel would greet with, in front of the text", () => {
     // A handle wins over a display name in `buildGroupReplyAddress`, so
