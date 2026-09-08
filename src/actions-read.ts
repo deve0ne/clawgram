@@ -4,7 +4,11 @@ import path from "node:path";
 
 import type { ActionContext } from "./action-context";
 import { resolveAccountDiscoverChats, resolveAccountReadChats } from "./account-scopes";
-import { INBOUND_MEDIA_MAX_BYTES, understandAttachmentFile } from "./attachments";
+import {
+  INBOUND_MEDIA_MAX_BYTES,
+  resolveBoundAgentIdForMedia,
+  understandAttachmentFile,
+} from "./attachments";
 import { describeChat, parseChatInfoParams } from "./chat-info";
 import { isChatDiscoveryEnabled, parseDialogsParams } from "./dialogs";
 import { fetchedMediaFileName, parseFetchMediaParams } from "./fetch-media";
@@ -212,6 +216,7 @@ export async function handleReadAction(ctx: ActionContext): Promise<unknown> {
           filePath: downloaded.path,
           mimeType: downloaded.mimeType,
           understanding: downloaded.understanding,
+          agentId: resolveBoundAgentIdForMedia(cfg, fetchAccountId),
         });
         if (!read) {
           readError = "read-empty";

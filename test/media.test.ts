@@ -254,6 +254,21 @@ describe("inboundMediaUnderstanding", () => {
     assert.equal(inboundMediaUnderstanding({ kind: "photo" }), "description");
   });
 
+  it("reads static WebP stickers but leaves animated stickers as metadata", () => {
+    assert.equal(
+      inboundMediaUnderstanding({ kind: "sticker", mimeType: "image/webp", emoji: "👍" }),
+      "description",
+    );
+    assert.equal(
+      inboundMediaUnderstanding({ kind: "sticker", mimeType: "application/x-tgsticker" }),
+      undefined,
+    );
+    assert.equal(
+      inboundMediaUnderstanding({ kind: "sticker", mimeType: "video/webm" }),
+      undefined,
+    );
+  });
+
   it("reads an image sent as a file — only the envelope differs", () => {
     assert.equal(
       inboundMediaUnderstanding({ kind: "document", mimeType: "image/png" }),

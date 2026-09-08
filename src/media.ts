@@ -160,6 +160,9 @@ export function inboundMediaUnderstanding(media: HistoryMedia | undefined): Inbo
   if (!media) return undefined;
   if (media.kind === "voice" || media.kind === "audio") return "transcript";
   if (media.kind === "photo") return "description";
+  // Static Telegram stickers are ordinary WebP images. Animated TGS and
+  // video WebM stickers remain metadata-only until core can read them.
+  if (media.kind === "sticker" && media.mimeType === "image/webp") return "description";
   // A document can be an image sent "as file" — Telegram keeps the pixels,
   // only the envelope differs, so read it rather than announce it.
   if (media.kind === "document" && media.mimeType?.startsWith("image/")) return "description";

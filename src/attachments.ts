@@ -27,12 +27,28 @@ export const INBOUND_MEDIA_MAX_BYTES = 25 * 1024 * 1024;
  * use: a wrong guess would fail the read anyway, and returning undefined lets
  * the caller degrade instead of throwing.
  */
-function resolveAgentDirForMedia(cfg: any): string | undefined {
-  const stateDir = resolveStateDir();
-  const configuredId = cfg?.agents?.defaults?.id;
-  const agentId = typeof configuredId === "string" && configuredId.trim() ? configuredId.trim() : "main";
+export function resolveAgentDirForMedia(agentId: string | undefined, stateDir = resolveStateDir()): string | undefined {
+  if (typeof agentId !== "string" || !agentId.trim()) return undefined;
   const dir = path.join(stateDir, "agents", agentId, "agent");
   return existsSync(dir) ? dir : undefined;
+}
+
+/**
+ * Message actions do not receive the inbound route on the SDK version this
+ * plugin supports. For a later `fetch-media` call, recover the account's
+ * explicit agent binding instead of silently reading with `main` credentials.
+ */
+export function resolveBoundAgentIdForMedia(cfg: any, accountId: string): string | undefined {
+  const bindings = Array.isArray(cfg?.bindings) ? cfg.bindings : [];
+  const candidates = bindings.filter((binding: any) =>
+    binding?.match?.channel === "clawgram"
+    && typeof binding?.agentId === "string"
+    && binding.agentId.trim(),
+  );
+  const exact = candidates.find((binding: any) => binding.match?.accountId === accountId);
+  const wildcard = candidates.find((binding: any) => binding.match?.accountId === "*");
+  const channelDefault = candidates.find((binding: any) => binding.match?.accountId === undefined);
+  return (exact ?? wildcard ?? channelDefault)?.agentId?.trim() || undefined;
 }
 
 /**
@@ -49,6 +65,7 @@ export async function understandAttachmentFile(params: {
   filePath: string;
   mimeType?: string;
   understanding: "transcript" | "description";
+  agentId?: string;
 }): Promise<string | undefined> {
   const media = params.runtime?.mediaUnderstanding;
   if (!media) return undefined;
@@ -63,7 +80,7 @@ export async function understandAttachmentFile(params: {
       filePath: params.filePath,
       cfg: params.cfg,
       mime: params.mimeType,
-      agentDir: resolveAgentDirForMedia(params.cfg),
+      agentDir: resolveAgentDirForMedia(params.agentId),
     });
 
   const text = typeof result?.text === "string" ? result.text.trim() : "";
@@ -79,6 +96,7 @@ export async function readInboundAttachment(params: {
   accountId: string;
   chatId: string;
   messageId: string;
+  agentId: string;
 }): Promise<{ text: string; understanding: "transcript" | "description" } | undefined> {
   const media = params.runtime?.mediaUnderstanding;
   const message = params.event?.message;
@@ -115,6 +133,7 @@ export async function readInboundAttachment(params: {
       filePath: downloaded.path,
       mimeType: downloaded.mimeType,
       understanding: downloaded.understanding,
+      agentId: params.agentId,
     });
     if (!read) {
       params.log?.info?.("clawgram attachment read empty", {

@@ -416,6 +416,27 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
       await resolveNamelessSender(normalized, rawMessage, client);
     }
 
+    // Resolve the actual destination before media understanding. Vision uses
+    // that agent's credential directory; guessing defaults.id/main breaks a
+    // non-default binding such as Orphea's and can select the wrong identity.
+    const scopedInboundPeerId = normalized.chatType === "group"
+      ? buildScopedGroupPeerId(accountId, normalized.chatId)
+      : inboundSenderId;
+    const inboundRouteBuilder = senderMayReachAgent
+      ? resolveInboundRouteEnvelopeBuilderWithRuntime({
+        cfg,
+        channel: "clawgram",
+        accountId,
+        peer: {
+          kind: normalized.chatType === "group" ? "group" : "direct",
+          id: scopedInboundPeerId,
+        },
+        runtime: channelRuntime,
+        sessionStore: cfg?.session?.store,
+      })
+      : undefined;
+    const routedAgentId = (inboundRouteBuilder?.route as ResolvedAgentRoute | undefined)?.agentId;
+
     // An attachment carries no text of its own, and dropping it as
     // "empty" is how the assistant used to go silent on being spoken
     // to or shown something. Read it into the body instead: for a
@@ -442,6 +463,7 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
       accountId,
       chatId: normalized.chatId,
       messageId: normalized.messageId,
+      agentId: routedAgentId!,
     }) : undefined;
     if (attachment) {
       const marker = attachment.understanding === "transcript" ? "голосовое" : "изображение";
@@ -597,18 +619,7 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
         return;
       }
 
-      const scopedGroupPeerId = buildScopedGroupPeerId(accountId, normalized.chatId);
-      const { route: inboundRoute, buildEnvelope } = resolveInboundRouteEnvelopeBuilderWithRuntime({
-        cfg,
-        channel: "clawgram",
-        accountId,
-        peer: {
-          kind: "group",
-          id: scopedGroupPeerId,
-        },
-        runtime: channelRuntime,
-        sessionStore: cfg?.session?.store,
-      });
+      const { route: inboundRoute, buildEnvelope } = inboundRouteBuilder!;
       // channelRuntime comes from the untyped ctx, so the generic route type falls
       // back to the minimal RouteLike. The runtime value is a ResolvedAgentRoute.
       const route = inboundRoute as ResolvedAgentRoute;
