@@ -34,8 +34,20 @@ import {
 /** Ten minutes: long enough to spare the repeat lookups of one turn,
  *  short enough that a replaced session or a vanished peer is re-resolved. */
 const PEER_CACHE_TTL_MS = 10 * 60 * 1000;
+const TYPING_RPC_GRACE_MS = 1500;
 
 const peerLog = createSubsystemLogger("channels/clawgram");
+
+async function waitAtMost(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(resolve, timeoutMs);
+    const settle = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
+    void promise.then(settle, settle);
+  });
+}
 
 
 
@@ -944,9 +956,36 @@ export class GramJsClientManager {
       return await fn();
     }
 
+    const lease = await this.beginTyping(target, {
+      readMessageId: options?.readMessageId,
+      messageThreadId: options?.messageThreadId,
+      // Preserve the old addressed-turn behaviour: typing is optional UX and
+      // must not hold model dispatch behind a slow Telegram round trip.
+      waitForInitial: false,
+    });
+    try {
+      return await fn();
+    } finally {
+      await lease.finish();
+    }
+  }
+
+  /**
+   * Starts a separately owned typing lifecycle.
+   *
+   * The inbound path uses this only after an ambient group turn has produced
+   * a visible reply. Keeping it as a lease lets source delivery and message
+   * tool delivery share the same cleanup without announcing silent turns.
+   */
+  async beginTyping(target: unknown, options?: {
+    readMessageId?: number;
+    messageThreadId?: number;
+    waitForInitial?: boolean;
+  }): Promise<{ finish: () => Promise<void> }> {
     let peer: unknown;
     let readMarked = false;
     let stopped = false;
+    let finished = false;
     let activeTick: Promise<void> | undefined;
 
     const sendTyping = async () => {
@@ -976,9 +1015,9 @@ export class GramJsClientManager {
       }));
     };
 
-    const tick = () => {
+    const tick = (): Promise<void> | undefined => {
       if (stopped || activeTick) {
-        return;
+        return activeTick;
       }
 
       activeTick = sendTyping()
@@ -986,24 +1025,38 @@ export class GramJsClientManager {
         .finally(() => {
           activeTick = undefined;
         });
+      return activeTick;
     };
-    tick();
+    const initialTick = tick();
+    if (options?.waitForInitial !== false && initialTick) {
+      // Telegram UX is best-effort. Wait briefly so the normal case visibly
+      // precedes the answer, but never hold a ready answer behind a stuck RPC.
+      await waitAtMost(initialTick, TYPING_RPC_GRACE_MS);
+    }
     const interval = setInterval(tick, 4000);
 
-    try {
-      return await fn();
-    } finally {
-      stopped = true;
-      clearInterval(interval);
-      await activeTick?.catch(() => undefined);
+    return {
+      finish: async () => {
+        if (finished) return;
+        finished = true;
+        stopped = true;
+        clearInterval(interval);
+        const cleanup = (async () => {
+          await activeTick?.catch(() => undefined);
 
-      if (peer) {
-        await this.client.invoke(new Api.messages.SetTyping({
-          peer: peer as any,
-          action: new Api.SendMessageCancelAction(),
-        })).catch(() => undefined);
-      }
-    }
+          if (peer) {
+            await this.client.invoke(new Api.messages.SetTyping({
+              peer: peer as any,
+              topMsgId: options?.messageThreadId,
+              action: new Api.SendMessageCancelAction(),
+            })).catch(() => undefined);
+          }
+        })();
+        // A stuck Telegram request must not pin inbound cleanup forever. The
+        // detached cleanup continues and sends Cancel if that request recovers.
+        await waitAtMost(cleanup, TYPING_RPC_GRACE_MS);
+      },
+    };
   }
 
   async sendMedia(args: SendMediaArgs) {

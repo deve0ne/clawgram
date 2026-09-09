@@ -4,7 +4,12 @@ import { readStringOrNumberParam, readStringParam } from "openclaw/plugin-sdk/pa
 import type { ActionContext } from "./action-context";
 import { refuseOutboundOutsideScope, resolveAccountSendChats } from "./account-scopes";
 import { consumeGroupReplyAddress, peekGroupReplyAddress } from "./group-reply-address";
-import { hasRecentVisibleGroupReply, rememberTurnSend, rememberVisibleGroupReply } from "./group-visible-reply-guard";
+import {
+  hasRecentVisibleGroupReply,
+  rememberTurnSend,
+  rememberVisibleGroupReply,
+  startGroupTurnVisibleReply,
+} from "./group-visible-reply-guard";
 import {
   inferOutboundTargetKind,
   isSilentReplyText,
@@ -169,6 +174,19 @@ export async function handleSendAction(ctx: ActionContext): Promise<unknown> {
     // Read last, through core's scoped reader when it gave one: a dry
     // run or a refusal above must not open the file.
     const file = await loadOutboundMedia(attachedFile, allowedMediaRoots, readMedia);
+
+    if (
+      currentChannelTarget &&
+      currentChannelTarget === uploadTo &&
+      currentMessageId !== null &&
+      currentMessageId !== undefined
+    ) {
+      await startGroupTurnVisibleReply({
+        accountId: uploadAccountId,
+        chatId: uploadTo,
+        currentMessageId,
+      });
+    }
 
     const uploaded = await uploadGram.sendMedia({
       target: uploadTo,
@@ -358,6 +376,19 @@ export async function handleSendAction(ctx: ActionContext): Promise<unknown> {
   }
 
   const gram = requireRuntimeFor(resolvedAccountId);
+
+  if (
+    currentChannelTarget &&
+    currentChannelTarget === to &&
+    currentMessageId !== null &&
+    currentMessageId !== undefined
+  ) {
+    await startGroupTurnVisibleReply({
+      accountId: resolvedAccountId,
+      chatId: to,
+      currentMessageId,
+    });
+  }
 
   const sent = await gram.sendText({
     target: to,

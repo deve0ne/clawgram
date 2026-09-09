@@ -266,7 +266,7 @@ loud where it does occur.
 | `replyParseMode` | `"html"` \| `"markdown"` \| `"none"` | unset | Outbound format for replies, core-delivered text, captions and `send` calls that omit `parseMode` — see [Message formatting](#message-formatting) |
 | `twoFaPassword` | string \| SecretRef | unset | The account's Telegram 2FA password; read only by `transferOwnership` |
 | `reactionModel` | string | unset | Model ref or alias for the emoji pick on a silent mention. Unset = the agent's own model. Needs `plugins.entries.clawgram.llm.allowModelOverride: true` in the gateway config; without it the override is refused and the pick quietly falls back to the default model |
-| `processingReaction` | boolean | `false` | Temporarily adds 👀 after access/address checks and before an addressed turn runs. It is removed on every normal/error/timeout exit; ambient `open`-group messages never receive it |
+| `processingReaction` | boolean | `false` | Temporarily adds 👀 while a reply is being prepared. Addressed turns start it immediately; an ambient `open`-group turn starts it only when its first visible text/file delivery begins, so `NO_REPLY` stays unmarked. It is removed on every normal/error/timeout exit |
 
 Group config fields:
 
@@ -295,21 +295,25 @@ Two things are worth knowing before reaching for `open`:
 
 - it spends a **full turn on every message**, chatter included. Whether words
   are owed is then the agent's decision, and most of the time the answer is no;
-- the typing indicator is shown only for messages that actually addressed the
-  agent. Under `open` the room would otherwise watch it "type" through
-  conversations it is merely reading, with nothing following.
+- addressed messages show typing immediately. An ambient turn stays quiet while
+  the model decides whether to join in; if it begins a visible text/file reply,
+  typing and the optional processing reaction start immediately before that
+  delivery. A turn ending in `NO_REPLY` leaves neither behind.
 
 Name-based addresses derived from the configured agent identity work with both
 OpenClaw agent collection shapes (`agents.entries` and the older `agents.list`).
-They receive the same typing and optional processing reaction as an `@` mention;
-ordinary ambient messages remain silent.
+They receive the same immediate typing and optional processing reaction as an
+`@` mention. Ordinary ambient messages remain silent unless the agent actually
+starts a visible reply.
 
 A native Telegram reply already identifies its addressee, so Clawgram does
 not prepend the same `@mention` to the reply text. Text written by the agent
 itself is left unchanged.
 
-Emoji reactions are unaffected by the rung: the channel leaves one only where
-the agent was genuinely addressed, so background reading stays unmarked.
+Persistent emoji reactions are unaffected by the rung: the channel leaves one
+only where the agent was genuinely addressed. The temporary processing marker
+described above may also appear on an ambient message, but only when its answer
+has already crossed the visible-delivery boundary.
 
 ### Per-group tools, skills and system prompt
 

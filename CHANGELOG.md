@@ -18,6 +18,10 @@ recorded in `git log` only.
 
 ### Fixed
 
+- Open groups now keep ambient model deliberation invisible, then start typing
+  and the optional processing reaction immediately before the first visible
+  source reply or `message`-tool text/file send. `NO_REPLY` remains unmarked;
+  addressed turns retain their immediate indicators.
 - HTML-mode replies repair agent-authored Markdown links whose `]` and `(` are
   separated by horizontal whitespace or one soft line break. A blank line still
   keeps the label and later URL separate.

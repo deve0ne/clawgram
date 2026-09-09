@@ -11,39 +11,41 @@ import {
 import {
   beginGroupTurnDelivery,
   finishGroupTurnDelivery,
+  registerGroupTurnVisibleReplyStart,
   rememberTurnSend,
   resetVisibleGroupReplies,
+  startGroupTurnVisibleReply,
 } from "../src/group-visible-reply-guard";
 
 describe("group turn delivery accounting", () => {
-  it("counts a message.send tool result as visible for the same inbound turn", () => {
+  it("counts a message.send tool result as visible for the same inbound turn", async () => {
     resetVisibleGroupReplies();
     const turn = { accountId: "default", chatId: "-100123", currentMessageId: "42" };
 
     const emptyOwner = beginGroupTurnDelivery(turn, 1);
-    assert.equal(finishGroupTurnDelivery(turn, emptyOwner, 1), false);
+    assert.equal(await finishGroupTurnDelivery(turn, emptyOwner, 1), false);
     const owner = beginGroupTurnDelivery(turn, 1);
     rememberTurnSend(turn, 1);
     // The echo-suppression heuristic expires after 20 seconds. Dispatch
     // ownership must survive longer because a tool can keep working after it
     // has already sent the visible answer.
-    const toolSendDelivered = finishGroupTurnDelivery(turn, owner, 30_001);
+    const toolSendDelivered = await finishGroupTurnDelivery(turn, owner, 30_001);
     assert.equal(didGroupTurnDeliverVisibleReply({ dispatchDelivered: false, toolSendDelivered }), true);
     assert.equal(didGroupTurnDeliverVisibleReply({
       dispatchDelivered: false,
-      toolSendDelivered: finishGroupTurnDelivery({ ...turn, currentMessageId: "43" }, owner),
+      toolSendDelivered: await finishGroupTurnDelivery({ ...turn, currentMessageId: "43" }, owner),
     }), false);
   });
 
-  it("keeps overlapping deliveries of the same update independently owned", () => {
+  it("keeps overlapping deliveries of the same update independently owned", async () => {
     resetVisibleGroupReplies();
     const turn = { accountId: "default", chatId: "-100123", currentMessageId: "42" };
     const first = beginGroupTurnDelivery(turn, 1);
     rememberTurnSend(turn, 2);
     const second = beginGroupTurnDelivery(turn, 3);
 
-    assert.equal(finishGroupTurnDelivery(turn, first, 5), true);
-    assert.equal(finishGroupTurnDelivery(turn, second, 5), true);
+    assert.equal(await finishGroupTurnDelivery(turn, first, 5), true);
+    assert.equal(await finishGroupTurnDelivery(turn, second, 5), true);
   });
 
   it("keeps core dispatch receipts sufficient on their own", () => {
@@ -52,6 +54,64 @@ describe("group turn delivery accounting", () => {
       dispatchDelivered: true,
       toolSendDelivered: false,
     }), true);
+  });
+
+  it("starts response UX once, only when visible delivery begins", async () => {
+    resetVisibleGroupReplies();
+    const turn = { accountId: "default", chatId: "-100123", currentMessageId: "42" };
+    const owner = beginGroupTurnDelivery(turn, 1);
+    let starts = 0;
+    registerGroupTurnVisibleReplyStart(turn, owner, async () => { starts += 1; }, 1);
+
+    assert.equal(starts, 0, "arming a turn must not mark an ambient message");
+    await startGroupTurnVisibleReply(turn, 2);
+    await startGroupTurnVisibleReply(turn, 3);
+    assert.equal(starts, 1);
+    assert.equal(await finishGroupTurnDelivery(turn, owner, 4), false);
+  });
+
+  it("makes concurrent sends and owner cleanup wait for the same response UX start", async () => {
+    resetVisibleGroupReplies();
+    const turn = { accountId: "default", chatId: "-100123", currentMessageId: "42" };
+    const owner = beginGroupTurnDelivery(turn, 1);
+    let starts = 0;
+    let releaseStart!: () => void;
+    registerGroupTurnVisibleReplyStart(turn, owner, () => {
+      starts += 1;
+      return new Promise<void>((resolve) => { releaseStart = resolve; });
+    }, 1);
+
+    const firstSend = startGroupTurnVisibleReply(turn, 2);
+    await Promise.resolve();
+    const secondSend = startGroupTurnVisibleReply(turn, 3);
+    let secondSendSettled = false;
+    void secondSend.then(() => { secondSendSettled = true; });
+    const cleanup = finishGroupTurnDelivery(turn, owner, 4);
+    let cleanupSettled = false;
+    void cleanup.then(() => { cleanupSettled = true; });
+
+    await Promise.resolve();
+    assert.equal(starts, 1);
+    assert.equal(secondSendSettled, false);
+    assert.equal(cleanupSettled, false);
+
+    releaseStart();
+    await Promise.all([ firstSend, secondSend ]);
+    assert.equal(await cleanup, false);
+  });
+
+  it("detaches a finished owner before a concurrent send can arm it", async () => {
+    resetVisibleGroupReplies();
+    const turn = { accountId: "default", chatId: "-100123", currentMessageId: "42" };
+    const owner = beginGroupTurnDelivery(turn, 1);
+    let starts = 0;
+    registerGroupTurnVisibleReplyStart(turn, owner, () => { starts += 1; }, 1);
+
+    const cleanup = finishGroupTurnDelivery(turn, owner, 2);
+    await startGroupTurnVisibleReply(turn, 2);
+
+    assert.equal(await cleanup, false);
+    assert.equal(starts, 0);
   });
 });
 
@@ -277,16 +337,37 @@ describe("group typing follows the address decision", () => {
     } } } },
   };
 
-  async function observedTyping(message: Record<string, unknown>, cfg: unknown = groupCfg) {
+  async function observedTyping(
+    message: Record<string, unknown>,
+    cfg: unknown = groupCfg,
+    response: "silent" | "source" | "tool" = "silent",
+  ) {
+    resetVisibleGroupReplies();
     const observations: Array<{
       target: unknown;
       options: Record<string, unknown> | undefined;
       processing?: Record<string, unknown>;
       processingFinished?: boolean;
+      responseTypingStarted?: boolean;
+      responseTypingFinished?: boolean;
     }> = [];
     let processing: Record<string, unknown> | undefined;
     let processingFinished = false;
+    let responseTypingStarted = false;
+    let responseTypingFinished = false;
     const base = pastTheGates({ cfg });
+    const channelRuntime = base.ctx.channelRuntime as any;
+    channelRuntime.session.recordInboundSession = async () => {};
+    channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher = async ({ dispatcherOptions }: any) => {
+      if (response === "source") {
+        await dispatcherOptions.deliver({ text: "ответ" });
+      } else if (response === "tool") {
+        const turn = { accountId: "default", chatId: "-4242", currentMessageId: "20" };
+        await startGroupTurnVisibleReply(turn);
+        rememberTurnSend(turn);
+      }
+      return undefined;
+    };
     const gram = {
       ...base.ctx.gram,
       withTyping: async (target: unknown, fn: () => Promise<unknown>, options?: Record<string, unknown>) => {
@@ -296,6 +377,10 @@ describe("group typing follows the address decision", () => {
       beginProcessingReaction: async (input: Record<string, unknown>) => {
         processing = input;
         return { finish: async () => { processingFinished = true; } };
+      },
+      beginTyping: async () => {
+        responseTypingStarted = true;
+        return { finish: async () => { responseTypingFinished = true; } };
       },
     };
     await handleInboundEvent({ message: {
@@ -307,7 +392,7 @@ describe("group typing follows the address decision", () => {
       ...message,
     } }, { ...base.ctx, gram } as never);
     return observations[0]
-      ? { ...observations[0], processing, processingFinished }
+      ? { ...observations[0], processing, processingFinished, responseTypingStarted, responseTypingFinished }
       : undefined;
   }
 
@@ -316,13 +401,26 @@ describe("group typing follows the address decision", () => {
     assert.equal(observed?.target, "-4242");
     assert.equal(observed?.options?.typing, false);
     assert.equal(observed?.processing, undefined);
+    assert.equal(observed?.responseTypingStarted, false);
   });
+
+  for (const response of [ "source", "tool" ] as const) {
+    it(`starts processing and typing when an ambient turn begins a ${response} reply`, async () => {
+      const observed = await observedTyping({}, groupCfg, response);
+      assert.equal(observed?.options?.typing, false, "ambient work stays quiet before delivery");
+      assert.deepEqual(observed?.processing, { target: "-4242", messageId: "20", enabled: true });
+      assert.equal(observed?.responseTypingStarted, true);
+      assert.equal(observed?.responseTypingFinished, true);
+      assert.equal(observed?.processingFinished, true);
+    });
+  }
 
   it("shows typing for an explicit mention", async () => {
     const observed = await observedTyping({ message: "@agent, посмотри" });
     assert.equal(observed?.options?.typing, true);
     assert.deepEqual(observed?.processing, { target: "-4242", messageId: "20", enabled: true });
     assert.equal(observed?.processingFinished, true);
+    assert.equal(observed?.responseTypingStarted, false, "addressed turns keep their existing immediate lifecycle");
   });
 
   it("shows typing and processing when the configured identity is named without @", async () => {

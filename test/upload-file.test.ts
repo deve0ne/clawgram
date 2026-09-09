@@ -6,6 +6,7 @@ import { createChannelPlugin } from "../src/channel";
 import {
   beginGroupTurnDelivery,
   finishGroupTurnDelivery,
+  registerGroupTurnVisibleReplyStart,
   resetVisibleGroupReplies,
 } from "../src/group-visible-reply-guard";
 import type { RuntimeMap } from "../src/types";
@@ -31,10 +32,11 @@ describe("upload-file carries a real file", () => {
   });
 
   // Records what would have gone to Telegram instead of going there.
-  const withRecordingRuntime = () => {
+  const withRecordingRuntime = (onSend?: () => void) => {
     const calls: any[] = [];
     const runtimes = new Map([ [ "default", {
       sendMedia: async (args: any) => {
+        onSend?.();
         calls.push(args);
         return { id: 4242 };
       },
@@ -166,9 +168,13 @@ describe("upload-file carries a real file", () => {
 
   it("threads a media send to the current group message", async () => {
     resetVisibleGroupReplies();
-    const { channel, calls } = withRecordingRuntime();
+    let indicatorsStarted = false;
+    const { channel, calls } = withRecordingRuntime(() => {
+      assert.equal(indicatorsStarted, true, "response UX must start before Telegram receives the file");
+    });
     const turn = { accountId: "default", chatId: "-100123", currentMessageId: "10" };
     const owner = beginGroupTurnDelivery(turn);
+    registerGroupTurnVisibleReplyStart(turn, owner, () => { indicatorsStarted = true; });
 
     await channel.actions.handleAction({
       action: "send",
@@ -181,7 +187,7 @@ describe("upload-file carries a real file", () => {
     assert.equal(calls.length, 1);
     assert.equal(calls[0].caption, "вот файл");
     assert.equal(calls[0].replyToMessageId, 10);
-    assert.equal(finishGroupTurnDelivery(turn, owner), true);
+    assert.equal(await finishGroupTurnDelivery(turn, owner), true);
 
     const final = await channel.outbound.sendText({
       accountId: "default",
@@ -206,7 +212,7 @@ describe("upload-file carries a real file", () => {
       toolContext: { currentChannelId: "-100123", currentMessageId: "10" },
     });
 
-    assert.equal(finishGroupTurnDelivery(unrelatedTurn, owner), false);
+    assert.equal(await finishGroupTurnDelivery(unrelatedTurn, owner), false);
   });
 
   it("leaves a send without a file on the text path", async () => {

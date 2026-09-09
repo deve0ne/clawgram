@@ -78,8 +78,10 @@ import {
   finishGroupTurnDelivery,
   hadTurnSendJustNow,
   hasRecentVisibleGroupReply,
+  registerGroupTurnVisibleReplyStart,
   rememberTurnSend,
   rememberVisibleGroupReply,
+  startGroupTurnVisibleReply,
 } from "./group-visible-reply-guard";
 import {
   buildConversationTarget,
@@ -260,6 +262,8 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
   let directProcessingMessage: { chatId: string; messageId: string } | undefined;
   let groupProcessingLease: { finish: () => Promise<void> } | undefined;
   let groupProcessingMessage: { chatId: string; messageId: string } | undefined;
+  let groupResponseTypingLease: { finish: () => Promise<void> } | undefined;
+  let groupResponseMessage: { chatId: string; messageId: string } | undefined;
 
   try {
     const rawMessage = (event as any)?.message;
@@ -833,11 +837,12 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
       const messageThreadId = parseOptionalThreadId(normalized.messageThreadId);
       const groupTypingTarget = normalized.chatId;
       const processingReactionEnabled = cfg?.channels?.[CHANNEL_ID]?.accounts?.[accountId]?.processingReaction === true;
+      const groupWasAddressed = mentionDecision.effectiveWasMentioned || wasReplyToSelf;
 
       if (
         !groupProcessingLease &&
         processingReactionEnabled &&
-        (mentionDecision.effectiveWasMentioned || wasReplyToSelf)
+        groupWasAddressed
       ) {
         groupProcessingLease = await gram.beginProcessingReaction?.({
           target: normalized.chatId,
@@ -854,6 +859,51 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
         });
         groupProcessingMessage = { chatId: normalized.chatId, messageId: normalized.messageId };
       }
+
+      let ambientResponseIndicatorsStarted = false;
+      const startAmbientResponseIndicators = async () => {
+        if (groupWasAddressed || ambientResponseIndicatorsStarted) return;
+        ambientResponseIndicatorsStarted = true;
+
+        if (processingReactionEnabled && !groupProcessingLease) {
+          groupProcessingMessage = { chatId: normalized.chatId, messageId: normalized.messageId };
+          groupProcessingLease = await gram.beginProcessingReaction?.({
+            target: normalized.chatId,
+            messageId: normalized.messageId,
+            enabled: true,
+          }).catch((error: unknown) => {
+            log?.info?.("clawgram processing reaction unavailable", {
+              accountId,
+              chatId: normalized.chatId,
+              messageId: normalized.messageId,
+              error: String(error),
+            });
+            return undefined;
+          });
+        }
+
+        groupResponseMessage = { chatId: normalized.chatId, messageId: normalized.messageId };
+        groupResponseTypingLease = await gram.beginTyping?.(groupTypingTarget, {
+          readMessageId: Number(normalized.messageId),
+          messageThreadId,
+        }).catch((error: unknown) => {
+          log?.info?.("clawgram response typing unavailable", {
+            accountId,
+            chatId: normalized.chatId,
+            messageId: normalized.messageId,
+            error: String(error),
+          });
+          return undefined;
+        });
+
+        log?.info?.("clawgram ambient response indicators started", {
+          accountId,
+          chatId: normalized.chatId,
+          messageId: normalized.messageId,
+          processingReaction: Boolean(groupProcessingLease),
+          typing: Boolean(groupResponseTypingLease),
+        });
+      };
 
       await gram.withTyping(groupTypingTarget, async () => {
         log?.info?.("clawgram dispatching group reply", {
@@ -900,6 +950,7 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
           currentMessageId: normalized.messageId,
         };
         const groupTurnOwner = beginGroupTurnDelivery(groupTurnKey);
+        registerGroupTurnVisibleReplyStart(groupTurnKey, groupTurnOwner, startAmbientResponseIndicators);
         let dispatchResult: any;
         try {
           dispatchResult = await channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher({
@@ -923,6 +974,8 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
               if (!visibleText) {
                 return;
               }
+
+              await startGroupTurnVisibleReply(groupTurnKey);
 
               const replyToMessageId = payload.replyToId ? Number(payload.replyToId) : Number(normalized.messageId);
               const rememberedAddress = consumeGroupReplyAddress({
@@ -967,10 +1020,10 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
           counts: resolveInboundReplyDispatchCounts(dispatchResult),
           });
         } catch (error) {
-          finishGroupTurnDelivery(groupTurnKey, groupTurnOwner);
+          await finishGroupTurnDelivery(groupTurnKey, groupTurnOwner);
           throw error;
         }
-        const toolSendDelivered = finishGroupTurnDelivery(groupTurnKey, groupTurnOwner);
+        const toolSendDelivered = await finishGroupTurnDelivery(groupTurnKey, groupTurnOwner);
 
         const nothingDelivered = !didGroupTurnDeliverVisibleReply({
           dispatchDelivered: hasVisibleInboundReplyDispatch(dispatchResult),
@@ -1052,6 +1105,7 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
               fallbackTextLength: visibleFallbackText.length,
             });
 
+            await startAmbientResponseIndicators();
             await sendTextToConversation({
               text: prefixReplyTextToAddress(
                 visibleFallbackText,
@@ -1070,7 +1124,7 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
         // to someone who addressed her. Under `open` the turn runs on
         // every message in the chat, so without this the whole room
         // watches her "type" through conversations she is only reading.
-        typing: mentionDecision.effectiveWasMentioned || wasReplyToSelf,
+        typing: groupWasAddressed,
       });
 
       log?.info?.("clawgram group inbound handled", {
@@ -1229,6 +1283,14 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
       error: String(error),
     });
   } finally {
+    await groupResponseTypingLease?.finish().catch((error: unknown) => {
+      log?.info?.("clawgram response typing cleanup deferred", {
+        accountId,
+        chatId: groupResponseMessage?.chatId,
+        messageId: groupResponseMessage?.messageId,
+        error: String(error),
+      });
+    });
     await groupProcessingLease?.finish().catch((error: unknown) => {
       log?.info?.("clawgram processing reaction cleanup deferred", {
         accountId,

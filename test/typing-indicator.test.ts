@@ -104,6 +104,42 @@ describe("typing indicator", () => {
     assert.deepEqual(invoked, [ "SendMessageTypingAction", "SendMessageCancelAction" ]);
   });
 
+  test("a response-gated typing lease starts now and stops exactly once", async () => {
+    const { manager, invoked } = managerWithFakeClient();
+
+    const lease = await manager.beginTyping("-100", { readMessageId: 42 });
+    assert.deepEqual(invoked, [ "SendMessageTypingAction" ]);
+    await lease.finish();
+    await lease.finish();
+
+    assert.deepEqual(invoked, [ "SendMessageTypingAction", "SendMessageCancelAction" ]);
+  });
+
+  test("a stuck initial typing RPC cannot hold a ready response forever", async () => {
+    const requests: any[] = [];
+    const { manager } = managerWithFakeClient();
+    let releaseTyping!: () => void;
+    manager.client.invoke = (request: any) => {
+      requests.push(request);
+      if (request?.action?.className === "SendMessageTypingAction") {
+        return new Promise<void>((resolve) => { releaseTyping = resolve; });
+      }
+      return Promise.resolve();
+    };
+
+    const startedAt = Date.now();
+    const lease = await manager.beginTyping("-100", { readMessageId: 42 });
+    assert.ok(Date.now() - startedAt < 2500, "typing RPC must have a bounded effect on delivery");
+
+    const finishing = lease.finish();
+    releaseTyping();
+    await finishing;
+    assert.deepEqual(
+      requests.map((request) => request?.action?.className),
+      [ "SendMessageTypingAction", "SendMessageCancelAction" ],
+    );
+  });
+
   test("a forum topic carries topMsgId on the typing pulse", async () => {
     const requests: any[] = [];
     const { manager } = managerWithFakeClient();
@@ -113,6 +149,7 @@ describe("typing indicator", () => {
 
     assert.equal(requests[0]?.topMsgId, 77);
     assert.equal(requests.at(-1)?.action?.className, "SendMessageCancelAction");
+    assert.equal(requests.at(-1)?.topMsgId, 77);
   });
 
   // A chat the account cannot resolve must not cost the turn: the indicator is

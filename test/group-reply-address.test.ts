@@ -12,6 +12,7 @@ import {
 import {
   beginGroupTurnDelivery,
   finishGroupTurnDelivery,
+  registerGroupTurnVisibleReplyStart,
   rememberVisibleGroupReply,
   resetVisibleGroupReplies,
 } from "../src/group-visible-reply-guard";
@@ -119,6 +120,57 @@ describe("message.action send addresses the message the turn is answering", () =
     assert.equal(sent[ 0 ].replyToMessageId, 10);
   });
 
+  it("starts response indicators before a message-tool send", async () => {
+    const turn = { accountId: "default", chatId: "-100123", currentMessageId: "10" };
+    const owner = beginGroupTurnDelivery(turn);
+    let indicatorsStarted = false;
+    registerGroupTurnVisibleReplyStart(turn, owner, () => { indicatorsStarted = true; });
+    const gram = {
+      sendText: async () => {
+        assert.equal(indicatorsStarted, true);
+        return { id: 500 };
+      },
+      get replyParseMode() { return undefined; },
+    };
+    const channel = createChannelPlugin(new Map([ [ "default", gram ] ]) as unknown as RuntimeMap) as any;
+
+    await channel.actions.handleAction({
+      action: "send",
+      params: { to: "-100123", text: "готово" },
+      cfg,
+      accountId: "default",
+      toolContext: { currentChannelId: "-100123", currentMessageId: "10" },
+    });
+
+    assert.equal(await finishGroupTurnDelivery(turn, owner), true);
+  });
+
+  it("does not start response indicators for a silent message-tool send", async () => {
+    const turn = { accountId: "default", chatId: "-100123", currentMessageId: "10" };
+    const owner = beginGroupTurnDelivery(turn);
+    let indicatorStarts = 0;
+    registerGroupTurnVisibleReplyStart(turn, owner, () => { indicatorStarts += 1; });
+    const gram = {
+      sendText: async () => {
+        assert.fail("NO_REPLY must not reach Telegram");
+      },
+      get replyParseMode() { return undefined; },
+    };
+    const channel = createChannelPlugin(new Map([ [ "default", gram ] ]) as unknown as RuntimeMap) as any;
+
+    const result = parseResult(await channel.actions.handleAction({
+      action: "send",
+      params: { to: "-100123", text: "NO_REPLY" },
+      cfg,
+      accountId: "default",
+      toolContext: { currentChannelId: "-100123", currentMessageId: "10" },
+    }));
+
+    assert.equal(result.skipped, "silent");
+    assert.equal(indicatorStarts, 0);
+    assert.equal(await finishGroupTurnDelivery(turn, owner), false);
+  });
+
   it("still prefers an explicit replyToId over the turn's own message", async () => {
     rememberGroupReplyAddress({ accountId: "default", chatId: "-100123", replyToId: "10", address: "@owner" });
     rememberGroupReplyAddress({ accountId: "default", chatId: "-100123", replyToId: "11", address: "@colleague" });
@@ -169,7 +221,7 @@ describe("message.action send addresses the message the turn is answering", () =
     assert.equal(peekGroupReplyAddress({
       accountId: "default", chatId: "-100999", replyToId: "10",
     }), "@stranger");
-    assert.equal(finishGroupTurnDelivery(unrelatedTurn, unrelatedOwner), false);
+    assert.equal(await finishGroupTurnDelivery(unrelatedTurn, unrelatedOwner), false);
   });
 });
 

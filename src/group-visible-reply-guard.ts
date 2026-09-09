@@ -78,7 +78,14 @@ const lastTurnSends = new ExpiringMap<true>(GROUP_TURN_ECHO_WINDOW_MS);
  * pipeline opens it immediately before core dispatch and consumes it
  * immediately after dispatch. The long TTL is only crash cleanup.
  */
-const activeGroupTurns = new ExpiringMap<Map<string, boolean>>(24 * 60 * 60 * 1000);
+type ActiveGroupTurn = {
+  delivered: boolean;
+  replyStarted: boolean;
+  replyStartPromise?: Promise<void>;
+  onVisibleReplyStart?: () => Promise<void> | void;
+};
+
+const activeGroupTurns = new ExpiringMap<Map<string, ActiveGroupTurn>>(24 * 60 * 60 * 1000);
 let nextGroupTurnOwner = 0;
 
 export function beginGroupTurnDelivery(input: {
@@ -89,34 +96,88 @@ export function beginGroupTurnDelivery(input: {
   const key = buildVisibleGroupReplyKey(input);
   if (key) {
     const owner = `${++nextGroupTurnOwner}`;
-    const owners = activeGroupTurns.get(key, now) ?? new Map<string, boolean>();
+    const owners = activeGroupTurns.get(key, now) ?? new Map<string, ActiveGroupTurn>();
     // A replay that starts after its twin already sent must inherit that
     // observable fact. There may be no second tool call to mark the replay.
-    owners.set(owner, Array.from(owners.values()).some(Boolean));
+    const alreadyDelivered = Array.from(owners.values()).some((state) => state.delivered);
+    owners.set(owner, { delivered: alreadyDelivered, replyStarted: alreadyDelivered });
     activeGroupTurns.set(key, owners, now);
     return owner;
   }
   return undefined;
 }
 
-export function finishGroupTurnDelivery(input: {
+export async function finishGroupTurnDelivery(input: {
   accountId?: string | null;
   chatId: unknown;
   currentMessageId?: string | number | null;
-}, owner: string | undefined, now: number = Date.now()): boolean {
+}, owner: string | undefined, now: number = Date.now()): Promise<boolean> {
   const key = buildVisibleGroupReplyKey(input);
   if (!key || !owner) {
     return false;
   }
+
   const owners = activeGroupTurns.get(key, now);
-  const delivered = owners?.get(owner) === true;
+  const state = owners?.get(owner);
+  const delivered = state?.delivered === true;
+  // Detach synchronously, before the first await. A concurrent send must not
+  // arm an owner whose dispatch has already reached cleanup.
   owners?.delete(owner);
   if (!owners || owners.size === 0) {
     activeGroupTurns.delete(key);
   } else {
     activeGroupTurns.set(key, owners, now);
   }
+
+  // Another overlapping delivery may have started this owner's callback.
+  // Do not let the owner tear down its leases while that callback is still
+  // acquiring them; the callback promise is installed before start() yields.
+  await state?.replyStartPromise?.catch(() => undefined);
   return delivered;
+}
+
+/**
+ * Attaches channel UX to one live inbound turn without guessing whether the
+ * model will speak. The callback is armed before dispatch; a source reply or
+ * the message tool triggers it only when visible delivery is about to begin.
+ */
+export function registerGroupTurnVisibleReplyStart(input: {
+  accountId?: string | null;
+  chatId: unknown;
+  currentMessageId?: string | number | null;
+}, owner: string | undefined, callback: () => Promise<void> | void, now: number = Date.now()): void {
+  const key = buildVisibleGroupReplyKey(input);
+  if (!key || !owner) return;
+  const owners = activeGroupTurns.get(key, now);
+  const state = owners?.get(owner);
+  if (!owners || !state || state.replyStarted) return;
+  state.onVisibleReplyStart = callback;
+  activeGroupTurns.set(key, owners, now);
+}
+
+/** Starts every owner of this physical update once, before its first send. */
+export async function startGroupTurnVisibleReply(input: {
+  accountId?: string | null;
+  chatId: unknown;
+  currentMessageId?: string | number | null;
+}, now: number = Date.now()): Promise<void> {
+  const key = buildVisibleGroupReplyKey(input);
+  if (!key) return;
+  const owners = activeGroupTurns.get(key, now);
+  if (!owners) return;
+
+  const starts: Array<Promise<void>> = [];
+  for (const state of owners.values()) {
+    if (!state.replyStarted) {
+      state.replyStarted = true;
+      state.replyStartPromise = state.onVisibleReplyStart
+        ? Promise.resolve().then(state.onVisibleReplyStart)
+        : Promise.resolve();
+    }
+    if (state.replyStartPromise) starts.push(state.replyStartPromise);
+  }
+  activeGroupTurns.set(key, owners, now);
+  await Promise.allSettled(starts);
 }
 
 /** Records that the agent itself put a message in the chat during this turn. */
@@ -133,8 +194,8 @@ export function rememberTurnSend(input: {
   lastTurnSends.set(key, true, sentAt);
   const owners = activeGroupTurns.get(key, sentAt);
   if (owners) {
-    for (const owner of owners.keys()) {
-      owners.set(owner, true);
+    for (const state of owners.values()) {
+      state.delivered = true;
     }
     activeGroupTurns.set(key, owners, sentAt);
   }
