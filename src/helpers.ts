@@ -619,7 +619,59 @@ function hasTelegramMention(input: {
 }): boolean {
   const normalizedText = input.text.trim();
   const message = input.message;
-  const mentionRegexes = buildMentionRegexes(input.cfg, input.agentId);
+  let mentionRegexes = buildMentionRegexes(input.cfg, input.agentId);
+  if (input.agentId) {
+    // OpenClaw renamed the agent collection from `agents.list` to
+    // `agents.entries`. Clawgram supports both runtime generations, but older
+    // public SDK builds only inspect `list` when deriving name-based mention
+    // patterns. Those builds also wrap a derived Cyrillic name in JavaScript
+    // `\b`, whose ASCII-only word boundary never matches «Орфея». Adapt the
+    // current shape and replace the broken derived-name regex with one
+    // Unicode-aware boundary. Explicit mentionPatterns still take precedence.
+    const entries = input.cfg?.agents?.entries;
+    const entered = Array.isArray(entries)
+      ? entries.find((candidate: any) => candidate?.id === input.agentId)
+      : entries?.[ input.agentId ];
+    const listed = Array.isArray(input.cfg?.agents?.list)
+      ? input.cfg.agents.list.find((candidate: any) => candidate?.id === input.agentId)
+      : undefined;
+    const entry = entered ?? listed;
+    if (entry && typeof entry === "object") {
+      const identity = entry.identity ?? (
+        typeof entry.name === "string" && entry.name.trim()
+          ? { name: entry.name.trim() }
+          : undefined
+      );
+      mentionRegexes = buildMentionRegexes({
+        ...input.cfg,
+        agents: {
+          ...input.cfg?.agents,
+          list: [ { id: input.agentId, ...entry, identity } ],
+        },
+      }, input.agentId);
+      const agentPatternsExplicit = entry.groupChat && typeof entry.groupChat === "object"
+        && Object.hasOwn(entry.groupChat, "mentionPatterns");
+      const globalGroupChat = input.cfg?.messages?.groupChat;
+      const globalPatternsExplicit = globalGroupChat && typeof globalGroupChat === "object"
+        && Object.hasOwn(globalGroupChat, "mentionPatterns");
+      if (!agentPatternsExplicit && !globalPatternsExplicit) {
+        const identityName = typeof identity?.name === "string" ? identity.name.trim() : "";
+        const identityEmoji = typeof identity?.emoji === "string" ? identity.emoji.trim() : "";
+        const escapedParts = identityName
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((part: string) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+        mentionRegexes = [
+          ...(escapedParts.length > 0
+            ? [ new RegExp(`(?:^|[^\\p{L}\\p{N}\\p{M}_])@?${escapedParts.join("\\s+")}(?=$|[^\\p{L}\\p{N}\\p{M}_])`, "iu") ]
+            : []),
+          ...(identityEmoji
+            ? [ new RegExp(identityEmoji.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u") ]
+            : []),
+        ];
+      }
+    }
+  }
   const selfUsername = input.selfUsername?.replace(/^@/, "").trim();
   const entities = Array.isArray(message?.entities) ? message.entities : [];
   const hasAnyMention = Boolean(message?.mentioned) ||

@@ -65,6 +65,47 @@ describe("markdown becomes Telegram entities", () => {
     ]);
   });
 
+  it("repairs agent links split from their destination by whitespace", () => {
+    for (const separator of [ " ", "\t", "\n", " \n  " ]) {
+      const r = parsed(`пятая тоже в подарок — [источник]${separator}(https://t.me/pitnica_all/1515)`);
+      assert.equal(r.text, "пятая тоже в подарок — источник", JSON.stringify(separator));
+      assert.deepEqual(r.entities, [
+        { type: "MessageEntityTextUrl", offset: 23, length: 8, url: "https://t.me/pitnica_all/1515" },
+      ], JSON.stringify(separator));
+    }
+  });
+
+  it("does not join a label to a URL in another paragraph", () => {
+    const r = parsed("[источник]\n\n(https://t.me/pitnica_all/1515)");
+    assert.equal(r.text, "[источник]\n\n(https://t.me/pitnica_all/1515)");
+    assert.deepEqual(r.entities, []);
+  });
+
+  it("does not join whitespace-separated labels to malformed destinations", () => {
+    for (const separator of [ " ", "\n" ]) {
+      for (const destination of [ "https://", "https://?broken" ]) {
+        const source = `[источник]${separator}(${destination})`;
+        const r = parsed(source);
+        assert.equal(r.text, source, `${JSON.stringify(separator)} ${destination}`);
+        assert.deepEqual(r.entities, [], `${JSON.stringify(separator)} ${destination}`);
+      }
+    }
+  });
+
+  it("keeps RFC 6068 mailto recipient lists in Markdown and HTML links", () => {
+    const destination = "mailto:one@example.com,two@example.com";
+    for (const source of [ `[почта] (${destination})`, `<a href="${destination}">почта</a>` ]) {
+      const r = parsed(source);
+      // GramJS represents mailto links as MessageEntityEmail and replaces a
+      // custom label with the recipient address. Preserve that established
+      // parser behavior; the renderer's job is not to drop the valid href.
+      assert.equal(r.text, "one@example.com,two@example.com");
+      assert.deepEqual(r.entities, [
+        { type: "MessageEntityEmail", offset: 0, length: 31 },
+      ]);
+    }
+  });
+
   it("renders `inline code` and keeps markdown inside it literal", () => {
     const r = parsed("поле `active=false` и маркер `**не жирный**`");
     assert.equal(r.text, "поле active=false и маркер **не жирный**");

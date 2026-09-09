@@ -155,6 +155,20 @@ function escapeAttr(value: string): string {
  * a relative path or a bare word in `[x](y)` position is not a Telegram link. */
 const URL_RE = /^(https?:\/\/|tg:\/\/|mailto:)/i;
 
+function isValidLinkDestination(value: string): boolean {
+  if (!URL_RE.test(value)) return false;
+  // Preserve the schemes Telegram already accepted. Their target grammar is
+  // not hierarchical (`mailto:` may contain an RFC 6068 recipient list), so
+  // applying an HTTP host rule would reject valid existing links.
+  if (!/^https?:\/\//i.test(value)) return true;
+  try {
+    const parsed = new URL(value);
+    return parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 function parseAttrs(raw: string): Map<string, string> {
   const attrs = new Map<string, string>();
   for (const m of raw.matchAll(ATTR_RE)) {
@@ -168,7 +182,7 @@ function buildOpenTag(canonical: string, allowed: readonly string[] | undefined,
   for (const name of allowed ?? []) {
     if (!attrs.has(name)) continue;
     const value = attrs.get(name) ?? "";
-    if (name === "href" && !URL_RE.test(value.trim())) continue;
+    if (name === "href" && !isValidLinkDestination(value.trim())) continue;
     if (name === "class" && !/^language-[\w+#.-]+$/.test(value)) continue;
     if (name === "emoji-id" && !/^\d+$/.test(value)) continue;
     out += value === "" && name === "expandable" ? ` ${name}` : ` ${name}="${escapeAttr(value)}"`;
@@ -213,10 +227,22 @@ function tryLink(s: string, i: number): { html: string; next: number } | null {
     else if (c === "[") depth++;
     else if (c === "]" && --depth === 0) break;
   }
-  if (depth !== 0 || s[ j + 1 ] !== "(") return null;
+  if (depth !== 0) return null;
+
+  // Models occasionally put a space or a soft line break between the label
+  // and destination. Telegram then showed `[source]` and the raw URL as two
+  // fragments. Accept whitespace inside the same paragraph, but never cross
+  // a blank line and accidentally join unrelated prose to a later URL.
+  let openParen = j + 1;
+  let lineBreaks = 0;
+  while (openParen < s.length && /\s/.test(s[ openParen ])) {
+    if (s[ openParen ] === "\n" && ++lineBreaks > 1) return null;
+    openParen++;
+  }
+  if (s[ openParen ] !== "(") return null;
 
   let pdepth = 1;
-  let k = j + 2;
+  let k = openParen + 1;
   for (; k < s.length; k++) {
     const c = s[ k ];
     if (c === "\n") return null;
@@ -227,11 +253,11 @@ function tryLink(s: string, i: number): { html: string; next: number } | null {
   if (pdepth !== 0) return null;
 
   const label = s.slice(i + 1, j);
-  let dest = s.slice(j + 2, k).trim();
+  let dest = s.slice(openParen + 1, k).trim();
   if (dest.startsWith("<") && dest.endsWith(">")) dest = dest.slice(1, -1);
   const ws = dest.search(/\s/);
   if (ws !== -1) dest = dest.slice(0, ws); // an optional "title" is dropped
-  if (label.length === 0 || !URL_RE.test(dest)) return null;
+  if (label.length === 0 || !isValidLinkDestination(dest)) return null;
 
   return { html: `<a href="${escapeAttr(dest)}">${renderInline(label)}</a>`, next: k + 1 };
 }

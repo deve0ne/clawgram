@@ -325,6 +325,17 @@ describe("group typing follows the address decision", () => {
     assert.equal(observed?.processingFinished, true);
   });
 
+  it("shows typing and processing when the configured identity is named without @", async () => {
+    const cfg = {
+      ...groupCfg,
+      agents: { entries: { main: { identity: { name: "Орфея" } } } },
+    };
+    const observed = await observedTyping({ message: "что думает Орфея об этом?" }, cfg);
+    assert.equal(observed?.options?.typing, true);
+    assert.deepEqual(observed?.processing, { target: "-4242", messageId: "20", enabled: true });
+    assert.equal(observed?.processingFinished, true);
+  });
+
   it("keeps the processing marker off until the account opts in", async () => {
     const cfg = {
       channels: { clawgram: { accounts: { default: {
@@ -355,6 +366,7 @@ describe("group typing follows the address decision", () => {
     assert.equal(observed?.options?.readMessageId, 20);
     assert.deepEqual(observed?.processing, { target: "-4242", messageId: "20", enabled: true });
   });
+
 });
 
 describe("direct-message processing reaction", () => {

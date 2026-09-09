@@ -299,6 +299,11 @@ Two things are worth knowing before reaching for `open`:
   agent. Under `open` the room would otherwise watch it "type" through
   conversations it is merely reading, with nothing following.
 
+Name-based addresses derived from the configured agent identity work with both
+OpenClaw agent collection shapes (`agents.entries` and the older `agents.list`).
+They receive the same typing and optional processing reaction as an `@` mention;
+ordinary ambient messages remain silent.
+
 A native Telegram reply already identifies its addressee, so Clawgram does
 not prepend the same `@mention` to the reply text. Text written by the agent
 itself is left unchanged.
@@ -369,7 +374,7 @@ actions without a `parseMode` parameter. A per-call `parseMode` still wins.
 
 | Mode | Behavior |
 |---|---|
-| `"html"` | **Recommended for agents.** The text is rendered before sending (2.15.0): markdown (`**bold**`, `*italic*`, `` `code` ``, ``` fences, `[text](url)`, `# headings`, `> quotes`, `~~strike~~`, `\|\|spoiler\|\|`) becomes Telegram entities, hand-written Telegram HTML (`<b>`, `<a href>`, `<code>`, …) passes through, structural HTML (`<ul>`, `<p>`, …) is dropped, and stray `<`, `>`, `&` arrive as literal text instead of vanishing into a failed tag. Markdown inside code is never converted. |
+| `"html"` | **Recommended for agents.** The text is rendered before sending (2.15.0): markdown (`**bold**`, `*italic*`, `` `code` ``, ``` fences, `[text](url)`, `# headings`, `> quotes`, `~~strike~~`, `\|\|spoiler\|\|`) becomes Telegram entities, including links whose label and destination are separated by horizontal whitespace or one soft line break. Hand-written Telegram HTML (`<b>`, `<a href>`, `<code>`, …) passes through, structural HTML (`<ul>`, `<p>`, …) is dropped, and stray `<`, `>`, `&` arrive as literal text instead of vanishing into a failed tag. Markdown inside code is never converted. |
 | `"markdown"` | GramJS's own markdown parser: `**`, `__`, `~~`, `` ` ``, ``` ``` ``` only — no links, no single-asterisk emphasis. |
 | `"none"` | No parsing at all: the text is delivered exactly as typed. |
 | unset | GramJS's historical default, which is its markdown parser — **not** plain text. Set `"none"` if you want plain. |

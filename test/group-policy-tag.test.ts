@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 
-import { hasExplicitTelegramMention, resolveGroups } from "../src/helpers";
+import { hasExplicitTelegramMention, hasTelegramMention, resolveGroups } from "../src/helpers";
 
 /**
  * `tag` is the strictest rung of the group ladder: only an `@username` or a
@@ -69,6 +69,40 @@ describe("hasExplicitTelegramMention", () => {
   test("an unknown self username matches nothing", () => {
     assert.equal(hasExplicitTelegramMention({ selfUsername: undefined, text: "@vorontina тут?" }), false);
     assert.equal(hasExplicitTelegramMention({ selfUsername: "  ", text: "@vorontina тут?" }), false);
+  });
+});
+
+describe("hasTelegramMention identity compatibility", () => {
+  for (const [ shape, agents ] of [
+    [ "entries", { entries: { main: { identity: { name: "Орфея" } } } } ],
+    [ "list", { list: [ { id: "main", identity: { name: "Орфея" } } ] } ],
+  ] as const) {
+    test(`matches a Cyrillic identity from agents.${shape}`, () => {
+      const input = { cfg: { agents }, agentId: "main", selfUsername: "agent" };
+      assert.equal(hasTelegramMention({ ...input, text: "что думает Орфея?" }), true);
+      assert.equal(hasTelegramMention({ ...input, text: "псевдоОрфеяСервис" }), false);
+    });
+  }
+
+  test("uses explicit agent and global patterns instead of the identity fallback", () => {
+    const identity = { name: "Орфея" };
+    const withAgentOverride = {
+      agents: { entries: { main: { identity, groupChat: { mentionPatterns: [] } } } },
+    };
+    const withGlobalOverride = {
+      agents: { entries: { main: { identity } } },
+      messages: { groupChat: { mentionPatterns: [ "^only-this-trigger$" ] } },
+    };
+    assert.equal(hasTelegramMention({ cfg: withAgentOverride, agentId: "main", text: "Орфея" }), false);
+    assert.equal(hasTelegramMention({ cfg: withGlobalOverride, agentId: "main", text: "Орфея" }), false);
+    assert.equal(hasTelegramMention({ cfg: withGlobalOverride, agentId: "main", text: "only-this-trigger" }), true);
+  });
+
+  test("does not find Latin or Cyrillic identity names inside another word", () => {
+    for (const [ name, text ] of [ [ "Орфея", "xОрфеяy" ], [ "Alice", "доAliceпосле" ] ]) {
+      const cfg = { agents: { entries: { main: { identity: { name } } } } };
+      assert.equal(hasTelegramMention({ cfg, agentId: "main", text }), false);
+    }
   });
 });
 

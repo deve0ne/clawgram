@@ -16,6 +16,15 @@ recorded in `git log` only.
   a targeted membership lookup; basic groups use their full roster. Unavailable
   membership checks fail closed, and an absent setting preserves existing access.
 
+### Fixed
+
+- HTML-mode replies repair agent-authored Markdown links whose `]` and `(` are
+  separated by horizontal whitespace or one soft line break. A blank line still
+  keeps the label and later URL separate.
+- Name-based mentions derived from agent identities now work with the current
+  `agents.entries` config shape as well as the older `agents.list` shape, so
+  they receive the same typing and optional processing reaction as `@` mentions.
+
 ## [2.28.0] — 2026-09-08
 
 ### Fixed
