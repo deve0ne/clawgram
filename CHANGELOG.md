@@ -18,9 +18,13 @@ recorded in `git log` only.
 
 ### Fixed
 
-- Open groups now keep ambient model deliberation invisible, then start typing
-  and the optional processing reaction immediately before the first visible
-  source reply, core outbound delivery or `message`-tool text/file send.
+- Open groups keep ambient model deliberation invisible, then start typing and
+  the optional processing reaction on the first visible streaming text fragment,
+  before the answer is complete. Empty/`NO_REPLY` fragments stay unmarked; source
+  replies, core outbound and `message` text/file delivery share the fallback gate.
+  Indicator-only progress is not reported to OpenClaw as a delivered text preview.
+  Run-scoped Codex answer candidates cover replaceable final-answer streams;
+  raw reply/voice directives and silent markers do not trigger indicators.
   `NO_REPLY` remains unmarked; addressed turns retain their immediate indicators.
 - HTML-mode replies repair agent-authored Markdown links whose `]` and `(` are
   separated by horizontal whitespace or one soft line break. A blank line still

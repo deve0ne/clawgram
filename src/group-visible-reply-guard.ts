@@ -138,8 +138,9 @@ export async function finishGroupTurnDelivery(input: {
 
 /**
  * Attaches channel UX to one live inbound turn without guessing whether the
- * model will speak. The callback is armed before dispatch; a source reply or
- * the message tool triggers it only when visible delivery is about to begin.
+ * model will speak. The callback is armed before dispatch; the first visible
+ * text delta triggers it during generation, with delivery as a fallback for
+ * response paths that do not expose a text stream.
  */
 export function registerGroupTurnVisibleReplyStart(input: {
   accountId?: string | null;
@@ -155,7 +156,7 @@ export function registerGroupTurnVisibleReplyStart(input: {
   activeGroupTurns.set(key, owners, now);
 }
 
-/** Starts every owner of this physical update once, before its first send. */
+/** Starts every owner once, on its first text delta or non-streaming send. */
 export async function startGroupTurnVisibleReply(input: {
   accountId?: string | null;
   chatId: unknown;

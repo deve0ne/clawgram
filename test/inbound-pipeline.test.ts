@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { emitAgentEvent } from "openclaw/plugin-sdk/agent-harness-runtime";
 
 import {
   agentFacingGroupBody,
@@ -325,6 +326,151 @@ describe("the inbound pipeline survives what the network hands it", () => {
     const unaddressed = { message: { id: 10, peerId: { chatId: 4242 }, senderId: 500, message: "обсудим завтра" } };
     await handleInboundEvent(unaddressed, pastTheGates({ client, cfg }).ctx as never);
     assert.equal(touched.includes("getEntity"), false, `a dropped message resolved the sender; touched: ${touched.join(", ")}`);
+  });
+});
+
+describe("group indicators start during generation", () => {
+  async function streamingTurn(failIndicators = false) {
+    resetVisibleGroupReplies();
+    const events: string[] = [];
+    const cfg = { channels: { clawgram: { accounts: { default: {
+      processingReaction: true,
+      groups: { "-4242": { enabled: true, groupPolicy: "open", allowFrom: ["*"] } },
+    } } } } };
+    const base = pastTheGates({ cfg });
+    const channelRuntime = base.ctx.channelRuntime as any;
+    channelRuntime.session.recordInboundSession = async () => {};
+    let enter!: (options: any) => void;
+    const entered = new Promise<any>((resolve) => { enter = resolve; });
+    let finish!: () => void;
+    let fail!: (error: Error) => void;
+    const generation = new Promise<void>((resolve, reject) => { finish = resolve; fail = reject; });
+    channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher = async (options: any) => {
+      enter(options);
+      await generation;
+      return { counts: { final: events.includes("send") ? 1 : 0 } };
+    };
+    const gram = {
+      ...base.ctx.gram,
+      sendText: async () => { events.push("send"); return { id: 21 }; },
+      beginProcessingReaction: async () => {
+        events.push("processing");
+        if (failIndicators) throw new Error("reaction unavailable");
+        return { finish: async () => { events.push("processing-finish"); } };
+      },
+      beginTyping: async () => {
+        events.push("typing");
+        if (failIndicators) throw new Error("typing unavailable");
+        return { finish: async () => { events.push("typing-finish"); } };
+      },
+    };
+    const done = handleInboundEvent({ message: {
+      id: 20, peerId: { chatId: 4242 }, senderId: 500,
+      _sender: { firstName: "Reader" }, message: "А точно?",
+    } }, { ...base.ctx, gram } as never);
+    const options = await entered;
+    return { events, options, finish, fail, done };
+  }
+
+  for (const delivery of ["source", "core"] as const) {
+    it(`starts on the first text fragment while ${delivery} delivery is still blocked`, async () => {
+      const turn = await streamingTurn();
+      try {
+        assert.deepEqual(turn.events, []);
+        assert.equal(await turn.options.replyOptions.onPartialReply({ text: "Да" }), false,
+          "indicator-only progress must not count as delivered text in OpenClaw");
+        assert.deepEqual(turn.events, ["processing", "typing"], "generation is still pending; nothing sent");
+        await turn.options.replyOptions.onPartialReply({ text: "Да, сейчас проверю" });
+        assert.deepEqual(turn.events, ["processing", "typing"], "one lease per turn");
+        if (delivery === "source") {
+          await turn.options.dispatcherOptions.deliver({ text: "Да, проверила" });
+          assert.deepEqual(turn.events, ["processing", "typing", "send"]);
+        } else {
+          // Core's outbound may bypass dispatcherOptions.deliver entirely.
+          // Its delivery gate must reuse the already-running indicators.
+          await startGroupTurnVisibleReply({ accountId: "default", chatId: "-4242", currentMessageId: "20" });
+          assert.deepEqual(turn.events, ["processing", "typing"]);
+        }
+      } finally {
+        turn.finish();
+        await turn.done;
+      }
+      assert.equal(turn.events.filter((event) => event === "processing-finish").length, 1);
+      assert.equal(turn.events.filter((event) => event === "typing-finish").length, 1);
+      await turn.options.replyOptions.onPartialReply({ text: "late callback" });
+      assert.equal(turn.events.filter((event) => event === "processing").length, 1, "cleanup seals the turn");
+    });
+  }
+
+  it("does not mark an empty or NO_REPLY stream, including split control tokens", async () => {
+    const turn = await streamingTurn();
+    try {
+      for (const text of [undefined, "", " ", "N", "NO", "NO_", "NO_RE", "NO_REPL", "NO_REPLY", " no_reply ", "HEARTBEAT_OK"]) {
+        assert.equal(await turn.options.replyOptions.onPartialReply({ text }), false);
+        assert.deepEqual(turn.events, [], `silent fragment: ${text}`);
+      }
+    } finally {
+      turn.finish();
+      await turn.done;
+    }
+    assert.deepEqual(turn.events, []);
+  });
+
+  it("observes this run's Codex answer candidate when replaceable text bypasses onPartialReply", async () => {
+    const turn = await streamingTurn();
+    const candidate = (runId: string, text: string, kind = "answer_candidate", status = "candidate") => {
+      emitAgentEvent({ runId, stream: "item", data: {
+        itemId: "final-item", kind, status, phase: "update", progressText: text,
+        source: "codex-app-server", hideFromChannelProgress: true,
+      } });
+    };
+    try {
+      candidate("unrelated-run", "ответ из другого чата");
+      candidate(turn.options.replyOptions.runId, "думаю", "reasoning");
+      candidate(turn.options.replyOptions.runId, "промежуточный текст", "preamble");
+      candidate(turn.options.replyOptions.runId, "прежний ответ", "answer_candidate", "superseded");
+      for (const text of ["", "N", "NO_RE", "NO_REPLY", "**NO_REPLY**", "[", "[[reply_to_", "[[reply_to_current]] NO_REPLY", "[[audio_as_voice]]",
+        "<", "<thi", "<think>", "<think>silent", "<think>silent</thi", "<think>silent</think>NO_REPLY",
+        "<think>silent</think><think>still silent", "<think><think>nested</think>still silent"]) {
+        candidate(turn.options.replyOptions.runId, text);
+      }
+      await new Promise(setImmediate);
+      assert.deepEqual(turn.events, []);
+      candidate(turn.options.replyOptions.runId, "<think>ready</think>Да, ");
+      await new Promise(setImmediate);
+      assert.deepEqual(turn.events, ["processing", "typing"], "no partial callback and no delivery yet");
+      await turn.options.replyOptions.onPartialReply({ text: "Да, проверяю" });
+      assert.deepEqual(turn.events, ["processing", "typing"], "both signals share one gate");
+    } finally {
+      turn.finish();
+      await turn.done;
+    }
+    candidate(turn.options.replyOptions.runId, "late candidate");
+    await new Promise(setImmediate);
+    assert.equal(turn.events.filter((event) => event === "processing").length, 1);
+  });
+
+  it("releases indicators if generation fails after the first fragment", async () => {
+    const turn = await streamingTurn();
+    await turn.options.replyOptions.onPartialReply({ text: "Проверяю" });
+    turn.fail(new Error("model stream failed"));
+    await turn.done;
+    assert.deepEqual(turn.events.slice(0, 2), ["processing", "typing"]);
+    assert.ok(turn.events.includes("processing-finish"));
+    assert.ok(turn.events.includes("typing-finish"));
+    assert.equal(turn.events.includes("send"), false);
+  });
+
+  it("still delivers the answer when early indicators fail", async () => {
+    const turn = await streamingTurn(true);
+    try {
+      assert.equal(await turn.options.replyOptions.onPartialReply({ text: "Да" }), false);
+      await turn.options.dispatcherOptions.deliver({ text: "Да, проверила" });
+      assert.deepEqual(turn.events, ["processing", "typing", "send"]);
+    } finally {
+      turn.finish();
+      await turn.done;
+    }
   });
 });
 

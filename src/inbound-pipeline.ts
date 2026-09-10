@@ -28,6 +28,9 @@ import {
   resolveInboundMentionDecision,
 } from "openclaw/plugin-sdk/channel-inbound";
 import { createChannelReplyPipeline } from "openclaw/plugin-sdk/channel-reply-pipeline";
+import { onAgentEvent } from "openclaw/plugin-sdk/agent-harness-runtime";
+import { randomUUID } from "node:crypto";
+import { stripInlineDirectiveTagsForDelivery, stripReasoningTagsFromText } from "openclaw/plugin-sdk/text-chunking";
 import { resolveInboundRouteEnvelopeBuilderWithRuntime } from "openclaw/plugin-sdk/inbound-envelope";
 import type { ResolvedAgentRoute } from "openclaw/plugin-sdk/routing";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
@@ -95,6 +98,7 @@ import {
   hasExplicitTelegramMention,
   prefixReplyTextToAddress,
   stripSilentReplyToken,
+  SILENT_REPLY_TOKEN,
   stripTtsDirectives,
   resolveReplyTarget,
   resolveChatTarget,
@@ -212,7 +216,7 @@ export function didGroupTurnDeliverVisibleReply(params: {
 export function visibleReplyText(params: {
   text: unknown;
   kind: "group" | "user";
-  where: "group reply" | "direct reply" | "transcript fallback";
+  where: "group reply" | "direct reply" | "transcript fallback" | "partial reply";
   accountId: string;
   chatId: string;
   messageId: string | number;
@@ -951,7 +955,50 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
         };
         const groupTurnOwner = beginGroupTurnDelivery(groupTurnKey);
         registerGroupTurnVisibleReplyStart(groupTurnKey, groupTurnOwner, startAmbientResponseIndicators);
+        const startResponseOnText = async (value: unknown) => {
+          // Candidate events carry raw model text, unlike onPartialReply's
+          // sanitized text. A split reply/voice directive is not answer prose.
+          const rawText = typeof value === "string" ? value.trim() : "";
+          // The SDK's whole-message sanitizer can preserve content after an
+          // unclosed reasoning tag at EOF. Streaming EOF is not message EOF:
+          // wait until these blocks close before treating their tail as prose.
+          let reasoningDepth = 0;
+          for (const tag of rawText.matchAll(/<\s*(\/?)\s*(?:(?:antml:|mm:)?(?:think(?:ing)?|thought)|antthinking)\b[^<>]*>/gi)) {
+            reasoningDepth = tag[1] ? Math.max(0, reasoningDepth - 1) : reasoningDepth + 1;
+          }
+          if (reasoningDepth > 0 || /<[^>]*$/.test(rawText)) return false;
+          const text = stripTtsDirectives(stripInlineDirectiveTagsForDelivery(
+            stripReasoningTagsFromText(rawText, { mode: "strict", trim: "both" }),
+          ).text);
+          if (text.startsWith("[[") && !text.includes("]]")) return false;
+          const controlText = text.replace(/^\p{P}+|\p{P}+$/gu, "").trim().toUpperCase();
+          const isControlPrefix = [SILENT_REPLY_TOKEN, "HEARTBEAT_OK"]
+            .some((token) => token.startsWith(controlText));
+          if (!isControlPrefix && visibleReplyText({
+            text, kind: "group", where: "partial reply",
+            accountId, chatId: normalized.chatId, messageId: normalized.messageId, log,
+          })) {
+            await startGroupTurnVisibleReply(groupTurnKey);
+          }
+          // Indicator-only progress is not a delivered text preview.
+          return false;
+        };
+        const runId = randomUUID();
+        // Codex can mark a final-answer stream replaceable after an intermediate
+        // item, withholding onPartialReply. Its explicit answer candidates are
+        // emitted during generation but hidden from onItemEvent. Observe only
+        // this run's candidates, never reasoning, tools or another chat's work.
+        const stopObservingAnswer = onAgentEvent((event) => {
+          if (event.runId !== runId || event.stream !== "item" ||
+              event.data.kind !== "answer_candidate" || event.data.status !== "candidate") return;
+          void startResponseOnText(event.data.progressText).catch((error: unknown) => {
+            log?.info?.("clawgram answer candidate indicators unavailable", {
+              accountId, chatId: normalized.chatId, messageId: normalized.messageId, error: String(error),
+            });
+          });
+        });
         let dispatchResult: any;
+        let toolSendDelivered = false;
         try {
           dispatchResult = await channelRuntime.reply.dispatchReplyWithBufferedBlockDispatcher({
           ctx: ctxPayload,
@@ -1005,7 +1052,14 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
             },
           },
           replyOptions: {
+            runId,
             onModelSelected,
+            // A text delta is the first observable commitment to an answer.
+            // Message/runner start also fires for NO_REPLY and cannot decide
+            // whether ambient deliberation should be visible.
+            onPartialReply: async (payload: { text?: string }) => {
+              return startResponseOnText(payload.text);
+            },
             // `groups.<id>.skills` → core's per-turn skill allowlist.
             // Undefined = inherit the agent's skills; [] = none here.
             skillFilter: groupConfig.skillFilter,
@@ -1019,11 +1073,10 @@ export async function handleInboundEvent(event: unknown, ctx: InboundContext) {
           queuedFinal: hasFinalInboundReplyDispatch(dispatchResult),
           counts: resolveInboundReplyDispatchCounts(dispatchResult),
           });
-        } catch (error) {
-          await finishGroupTurnDelivery(groupTurnKey, groupTurnOwner);
-          throw error;
+        } finally {
+          stopObservingAnswer();
+          toolSendDelivered = await finishGroupTurnDelivery(groupTurnKey, groupTurnOwner);
         }
-        const toolSendDelivered = await finishGroupTurnDelivery(groupTurnKey, groupTurnOwner);
 
         const nothingDelivered = !didGroupTurnDeliverVisibleReply({
           dispatchDelivered: hasVisibleInboundReplyDispatch(dispatchResult),

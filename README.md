@@ -266,7 +266,7 @@ loud where it does occur.
 | `replyParseMode` | `"html"` \| `"markdown"` \| `"none"` | unset | Outbound format for replies, core-delivered text, captions and `send` calls that omit `parseMode` — see [Message formatting](#message-formatting) |
 | `twoFaPassword` | string \| SecretRef | unset | The account's Telegram 2FA password; read only by `transferOwnership` |
 | `reactionModel` | string | unset | Model ref or alias for the emoji pick on a silent mention. Unset = the agent's own model. Needs `plugins.entries.clawgram.llm.allowModelOverride: true` in the gateway config; without it the override is refused and the pick quietly falls back to the default model |
-| `processingReaction` | boolean | `false` | Temporarily adds 👀 while a reply is being prepared. Addressed turns start it immediately; an ambient `open`-group turn starts it only when its first visible text/file delivery begins, so `NO_REPLY` stays unmarked. It is removed on every normal/error/timeout exit |
+| `processingReaction` | boolean | `false` | Temporarily adds 👀 while a reply is being prepared. Addressed turns start it immediately; an ambient `open`-group turn starts it on its first visible text fragment during generation, with delivery as a fallback for non-streaming paths. `NO_REPLY` stays unmarked. It is removed on every normal/error/timeout exit |
 
 Group config fields:
 
@@ -296,10 +296,17 @@ Two things are worth knowing before reaching for `open`:
 - it spends a **full turn on every message**, chatter included. Whether words
   are owed is then the agent's decision, and most of the time the answer is no;
 - addressed messages show typing immediately. An ambient turn stays quiet while
-  the model decides whether to join in; if it begins a visible text/file reply
-  through core delivery, source delivery or the `message` tool, typing and the
-  optional processing reaction start immediately before that delivery. A turn
-  ending in `NO_REPLY` leaves neither behind.
+  the model decides whether to join in; the first visible text fragment from
+  OpenClaw's `onPartialReply` starts typing and the optional processing reaction
+  while the answer is still being generated. Empty fragments and `NO_REPLY`
+  prefixes do not start either indicator. Source/core delivery and `message`
+  text/file sends use the same gate as a fallback when there is no text stream.
+  There is no additional classifier/model call: before the first visible text,
+  reasoning or tool use alone does not establish that an answer will follow.
+  Codex final-answer candidate events cover replaceable text streams that do
+  not call `onPartialReply`; the observer is scoped to this dispatch's run ID
+  and removed when dispatch settles. Providers without early answer events and
+  later queued followups retain delivery-time indicators.
 
 Name-based addresses derived from the configured agent identity work with both
 OpenClaw agent collection shapes (`agents.entries` and the older `agents.list`).
@@ -313,8 +320,8 @@ itself is left unchanged.
 
 Persistent emoji reactions are unaffected by the rung: the channel leaves one
 only where the agent was genuinely addressed. The temporary processing marker
-described above may also appear on an ambient message, but only when its answer
-has already crossed the visible-delivery boundary.
+described above may also appear on an ambient message once visible answer text
+starts streaming, even though no Telegram message has been sent yet.
 
 ### Per-group tools, skills and system prompt
 
