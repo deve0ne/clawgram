@@ -180,6 +180,26 @@ export async function startGroupTurnVisibleReply(input: {
   await Promise.allSettled(starts);
 }
 
+/** Marks only the live dispatch owners after a channel delivery succeeds. */
+export function rememberGroupTurnDelivery(input: {
+  accountId?: string | null;
+  chatId: unknown;
+  currentMessageId?: string | number | null;
+}, sentAt: number = Date.now()): void {
+  const key = buildVisibleGroupReplyKey(input);
+  if (!key) {
+    return;
+  }
+
+  const owners = activeGroupTurns.get(key, sentAt);
+  if (owners) {
+    for (const state of owners.values()) {
+      state.delivered = true;
+    }
+    activeGroupTurns.set(key, owners, sentAt);
+  }
+}
+
 /** Records that the agent itself put a message in the chat during this turn. */
 export function rememberTurnSend(input: {
   accountId?: string | null;
@@ -192,13 +212,7 @@ export function rememberTurnSend(input: {
   }
 
   lastTurnSends.set(key, true, sentAt);
-  const owners = activeGroupTurns.get(key, sentAt);
-  if (owners) {
-    for (const state of owners.values()) {
-      state.delivered = true;
-    }
-    activeGroupTurns.set(key, owners, sentAt);
-  }
+  rememberGroupTurnDelivery(input, sentAt);
 }
 
 /**

@@ -296,9 +296,10 @@ Two things are worth knowing before reaching for `open`:
 - it spends a **full turn on every message**, chatter included. Whether words
   are owed is then the agent's decision, and most of the time the answer is no;
 - addressed messages show typing immediately. An ambient turn stays quiet while
-  the model decides whether to join in; if it begins a visible text/file reply,
-  typing and the optional processing reaction start immediately before that
-  delivery. A turn ending in `NO_REPLY` leaves neither behind.
+  the model decides whether to join in; if it begins a visible text/file reply
+  through core delivery, source delivery or the `message` tool, typing and the
+  optional processing reaction start immediately before that delivery. A turn
+  ending in `NO_REPLY` leaves neither behind.
 
 Name-based addresses derived from the configured agent identity work with both
 OpenClaw agent collection shapes (`agents.entries` and the older `agents.list`).

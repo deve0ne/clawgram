@@ -237,10 +237,11 @@ describe("a turn that already spoke does not speak again", () => {
 
   const cfg = { channels: { clawgram: { accounts: { default: {} } } } };
 
-  function makeChannel() {
+  function makeChannel(onSend?: () => void) {
     const sent: Array<Record<string, unknown>> = [];
     const gram = {
       sendText: (args: Record<string, unknown>) => {
+        onSend?.();
         sent.push(args);
         return Promise.resolve({ id: 500 });
       },
@@ -284,6 +285,57 @@ describe("a turn that already spoke does not speak again", () => {
     });
 
     assert.equal(sent.length, 1);
+  });
+
+  it("starts response indicators before core outbound text delivery", async () => {
+    const turn = { accountId: "default", chatId: "-100123", currentMessageId: "10" };
+    const owner = beginGroupTurnDelivery(turn);
+    let indicatorsStarted = false;
+    registerGroupTurnVisibleReplyStart(turn, owner, () => { indicatorsStarted = true; });
+    const { channel } = makeChannel(() => {
+      assert.equal(indicatorsStarted, true);
+    });
+
+    await channel.outbound.sendText({
+      accountId: "default",
+      to: "-100123",
+      text: "готово",
+      replyToId: "10",
+    });
+
+    assert.equal(await finishGroupTurnDelivery(turn, owner), true);
+  });
+
+  it("does not treat a second core outbound chunk as a message-tool echo", async () => {
+    const { sent, channel } = makeChannel();
+
+    await channel.outbound.sendText({
+      accountId: "default", to: "-100123", text: "первая часть", replyToId: "10",
+    });
+    await channel.outbound.sendText({
+      accountId: "default", to: "-100123", text: "вторая часть", replyToId: "10",
+    });
+
+    assert.equal(sent.length, 2);
+  });
+
+  it("does not start response indicators for empty core outbound text", async () => {
+    const turn = { accountId: "default", chatId: "-100123", currentMessageId: "10" };
+    const owner = beginGroupTurnDelivery(turn);
+    let indicatorStarts = 0;
+    registerGroupTurnVisibleReplyStart(turn, owner, () => { indicatorStarts += 1; });
+    const { sent, channel } = makeChannel();
+
+    for (const text of [ "", "   " ]) {
+      const result = await channel.outbound.sendText({
+        accountId: "default", to: "-100123", text, replyToId: "10",
+      });
+      assert.equal(result.skipped, "empty");
+    }
+
+    assert.equal(sent.length, 0);
+    assert.equal(indicatorStarts, 0);
+    assert.equal(await finishGroupTurnDelivery(turn, owner), false);
   });
 
   it("delivers a later message about a different incoming message", async () => {

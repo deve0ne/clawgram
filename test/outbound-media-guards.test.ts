@@ -3,6 +3,13 @@ import test, { describe, beforeEach } from "node:test";
 
 import { createChannelPlugin } from "../src/channel";
 import { rememberGroupReplyAddress, resetGroupReplyAddresses } from "../src/group-reply-address";
+import {
+  beginGroupTurnDelivery,
+  finishGroupTurnDelivery,
+  hadTurnSendJustNow,
+  registerGroupTurnVisibleReplyStart,
+  resetVisibleGroupReplies,
+} from "../src/group-visible-reply-guard";
 import { forgetAccount, rememberAccount } from "../src/account-registry";
 import type { RuntimeMap } from "../src/types";
 
@@ -14,10 +21,10 @@ import type { RuntimeMap } from "../src/types";
 describe("outbound sendMedia guards", () => {
   const ACCOUNT = "media-acc";
 
-  function pluginWithRuntime() {
+  function pluginWithRuntime(onSend?: () => void) {
     const sent: any[] = [];
     const runtimes = new Map([ [ ACCOUNT, {
-      sendMedia: async (args: any) => { sent.push(args); return { id: 1 }; },
+      sendMedia: async (args: any) => { onSend?.(); sent.push(args); return { id: 1 }; },
       replyParseMode: undefined,
     } ] ]) as unknown as RuntimeMap;
     const plugin = createChannelPlugin(runtimes) as any;
@@ -26,6 +33,7 @@ describe("outbound sendMedia guards", () => {
 
   beforeEach(() => {
     resetGroupReplyAddresses();
+    resetVisibleGroupReplies();
     forgetAccount(ACCOUNT);
   });
 
@@ -86,6 +94,23 @@ describe("outbound sendMedia guards", () => {
 
     assert.equal(sent.length, 1);
     assert.equal(sent[0].caption, undefined);
+  });
+
+  test("starts response indicators before core outbound media delivery", async () => {
+    const turn = { accountId: ACCOUNT, chatId: "-1001", currentMessageId: "55" };
+    const owner = beginGroupTurnDelivery(turn);
+    let indicatorsStarted = false;
+    registerGroupTurnVisibleReplyStart(turn, owner, () => { indicatorsStarted = true; });
+    const { plugin } = pluginWithRuntime(() => {
+      assert.equal(indicatorsStarted, true);
+    });
+
+    await plugin.outbound.sendMedia({
+      accountId: ACCOUNT, to: "-1001", replyToId: "55", filePath: "/tmp/x.png",
+    });
+
+    assert.equal(await finishGroupTurnDelivery(turn, owner), true);
+    assert.equal(hadTurnSendJustNow(turn), false, "core media must not poison the message-tool echo guard");
   });
 });
 

@@ -52,6 +52,8 @@ import type { PluginConfig, RuntimeMap } from "./types";
 import { consumeGroupReplyAddress} from "./group-reply-address";
 import {
   hadTurnSendJustNow,
+  rememberGroupTurnDelivery,
+  startGroupTurnVisibleReply,
   } from "./group-visible-reply-guard";
 import {
   normalizeOutboundTarget,
@@ -153,6 +155,14 @@ export function createOutbound(runtimes: RuntimeMap) {
         return { skipped: "silent" as const };
       }
 
+      if (!ctx.text.trim()) {
+        actionLog.info("clawgram suppressing empty outbound send", {
+          accountId: ctx.accountId,
+          rawTo: ctx.to,
+        });
+        return { skipped: "empty" as const };
+      }
+
       // Область отправки — и здесь. Путь доставки ядра (`--deliver`,
       // анонсы субагентов) зовёт sendText напрямую, минуя resolveTarget и
       // handleAction, где барьер уже стоял: третий из трёх исходящих путей
@@ -226,6 +236,14 @@ export function createOutbound(runtimes: RuntimeMap) {
       const target = normalizeOutboundTarget(ctx.to);
       const messageThreadId = parseOptionalThreadId(ctx.threadId);
 
+      if (ctx.replyToId !== null && ctx.replyToId !== undefined) {
+        await startGroupTurnVisibleReply({
+          accountId: ctx.accountId,
+          chatId: target,
+          currentMessageId: ctx.replyToId,
+        });
+      }
+
       const sent = await gram.sendText({
         target,
         text: prefixReplyTextToAddress(ctx.text, groupReplyAddress, replyToMessageId),
@@ -234,6 +252,14 @@ export function createOutbound(runtimes: RuntimeMap) {
         messageThreadId,
         parseMode: gram.replyParseMode,
       });
+
+      if (ctx.replyToId !== null && ctx.replyToId !== undefined) {
+        rememberGroupTurnDelivery({
+          accountId: ctx.accountId,
+          chatId: target,
+          currentMessageId: ctx.replyToId,
+        });
+      }
 
       actionLog.info("clawgram outbound sendText completed", {
         accountId: ctx.accountId,
@@ -345,6 +371,14 @@ export function createOutbound(runtimes: RuntimeMap) {
       // refusal above must have passed before the file is opened.
       const file = await loadOutboundMedia(named, outboundRoots, ctx.mediaReadFile ?? ctx.mediaAccess?.readFile);
 
+      if (ctx.replyToId !== null && ctx.replyToId !== undefined) {
+        await startGroupTurnVisibleReply({
+          accountId: ctx.accountId,
+          chatId: target,
+          currentMessageId: ctx.replyToId,
+        });
+      }
+
       const sent = await gram.sendMedia({
         target,
         file,
@@ -359,6 +393,14 @@ export function createOutbound(runtimes: RuntimeMap) {
         messageThreadId,
         asVoice: ctx.audioAsVoice === true,
       });
+
+      if (ctx.replyToId !== null && ctx.replyToId !== undefined) {
+        rememberGroupTurnDelivery({
+          accountId: ctx.accountId,
+          chatId: target,
+          currentMessageId: ctx.replyToId,
+        });
+      }
 
       actionLog.info("clawgram outbound sendMedia completed", {
         accountId: ctx.accountId,
