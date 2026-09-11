@@ -82,6 +82,7 @@ import {
 export { resolveAccountOperatorIds };
 import { createOutbound } from "./outbound";
 import { handleInboundEvent } from "./inbound-pipeline";
+import { stopRuntimeIfOwned } from './runtime-registry';
 
 // Словарь имён живёт в ./actions. Реэкспорт — ради вызывающих снаружи:
 // тесты и другие модули знают его по этому файлу с 2.19.4.
@@ -262,8 +263,12 @@ export const createChannelPlugin = (runtimes: RuntimeMap, pluginRuntime?: Plugin
 
         if (runtimes.has(accountId)) {
           log?.warn?.("clawgram stale runtime detected, reconnecting", { accountId });
-          await runtimes.get(accountId)?.stop().catch(() => undefined);
-          runtimes.delete(accountId);
+          const staleRuntime = runtimes.get(accountId);
+          if (staleRuntime) {
+            await stopRuntimeIfOwned(runtimes, accountId, staleRuntime, () => {
+              forgetAccount(accountId);
+            }).catch(() => undefined);
+          }
         }
 
         // Credentials may be SecretRefs rather than literals. Resolve them here,
@@ -365,20 +370,16 @@ export const createChannelPlugin = (runtimes: RuntimeMap, pluginRuntime?: Plugin
         await waitUntilAbort(ctx.abortSignal, async () => {
           client.removeEventHandler(eventHandler, eventBuilder);
           client.removeEventHandler(joinEventHandler, joinEventBuilder);
-          forgetAccount(accountId);
-
-          const runtime = runtimes.get(accountId);
-          if (!runtime) {
-            return;
-          }
-
-          await runtime.stop();
-          runtimes.delete(accountId);
-
-          console.info("clawgram disconnected", {
-            accountId,
-            selfLabel,
+          const stoppedOwned = await stopRuntimeIfOwned(runtimes, accountId, gram, () => {
+            forgetAccount(accountId);
           });
+
+          if (stoppedOwned) {
+            console.info("clawgram disconnected", {
+              accountId,
+              selfLabel,
+            });
+          }
         });
       },
     },

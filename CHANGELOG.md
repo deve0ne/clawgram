@@ -18,6 +18,10 @@ recorded in `git log` only.
 
 ### Fixed
 
+- Re-registering the channel for an isolated agent turn no longer replaces the
+  connected account runtime with an empty registry, so `message` sends from
+  automations use the live Clawgram connection instead of failing with
+  `runtime not found for account`.
 - Open groups keep ambient model deliberation invisible, then start typing and
   the optional processing reaction on the first visible streaming text fragment,
   before the answer is complete. Empty/`NO_REPLY` fragments stay unmarked; source
